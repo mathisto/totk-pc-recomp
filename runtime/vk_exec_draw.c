@@ -33,7 +33,8 @@
 #define MAX_DESC 1024
 #define CHUNK_BYTES (4u << 20)
 #define ZERO_BYTES 65536u
-#define SUPPORT_BYTES 1408u   // Ryujinx SupportBuffer (std140): alpha_test, is_bgra[8], viewport_inverse, viewport_size, ...
+#define SUPPORT_BYTES 1424u   // Ryujinx SupportBuffer (std140): alpha_test, is_bgra[8], viewport_inverse, viewport_size, ...;
+                              // 1408: HDR parameters (support_fill)
 #define NVN_STAGE_VS 0
 #define NVN_STAGE_FS 1
 #define NVN_STAGE_CS 5
@@ -567,6 +568,7 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
 
 void vk_exec_image_gone(VkImage image) {
     vk_exec_bc_gone(image);
+    vk_hdr_image_gone(image);
     if (!views_by_image.klen) return;
     for (ViewNode *n = nvn_hm_del(&views_by_image, &image), *next; n; n = next) {
         next = n->next;
@@ -1432,6 +1434,11 @@ static void support_fill(uint8_t *b, float w, float h, float point_size) {
     const float one = 1.0f;
     memcpy(b + 1392, &point_size, 4);   // point_size (translator patch 0008): vertex shaders that write none output it
     for (int i = 0; i < 73; i++) memcpy(b + 192 + 16 * i, &one, 4);   // render scale 1: the host renders at guest size
+    if (vk_hdr_wanted()) {   // read by the HDR tonemap only (shaders/hdr_tonemap.frag), which declares it past the translator's
+        float hdr[4];
+        vk_hdr_support(hdr);
+        memcpy(b + 1408, hdr, 16);
+    }
 }
 
 // TOTK_BIND_STATS=1: bindings and descriptors per draw of each stage (Task 2.2's choice of the pushed stage), and how
@@ -2118,6 +2125,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     feedback_written(ex, &s);
     bind_vertex_buffers(ex);
     if (vk_dump_armed) vk_dump_draw(ex, &s, p, info);
+    if (vk_hdr_track) vk_hdr_draw(ex, info);
     vk_exec_oq_draw(ex);
     return 1;
 }

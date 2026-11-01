@@ -102,6 +102,15 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
   HUD stretched over it. The `aspect` setting (`fit`, the default; `stretch`) decides what the present does
   when the window's shape differs from the output's: `fit` letterboxes, where a 16:9 game in a wider window used to be
   stretched.
+- HDR (`hdr = 1`, `vk_hdr.c`). The game tonemaps its scene into an r11g11b10f target, upscales it and draws the HUD
+  into another float target, and a last draw copies that into the 8-bit sRGB window texture it presents. With HDR on,
+  the tonemap's fragment shader (recognised by its constants and resource names, not a hash) runs as
+  `shaders/hdr_tonemap.frag`, which keeps highlights up to the display's peak; the present reads the float target the
+  window texture was copied from (any other last draw into it, such as a menu or a movie, leaves the window texture,
+  shown at the HUD's white); a compute pass turns the picture into PQ code values in Rec. 2020 for an HDR10
+  swapchain, which FSR 1 or the blit then scale; the in-game menu is drawn into an RGBA8 image and blended on at the
+  HUD's white. Without an HDR10 surface format (Windows with "Use HDR" off, a compositor without colour management)
+  the swapchain stays SDR. `TOTK_SHOTS` reads the window texture, so its pictures clip highlights in HDR.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.
 - ASTC textures are uploaded as they are where the device reports `textureCompressionASTC_LDR`, and decoded by a compute shader everywhere else (`vk_astc.c`, `TOTK_ASTC`). The CPU decoder (`tex_astc*.c`) is the fallback and the test oracle.
 - Draw state. A draw whose program, bound state and textures repeat reuses the previous draw's shaders and skips rebuilding its descriptor sets; descriptor sets are written through update templates (`vk_exec_draw.c`, `vk_pipeline.c`).

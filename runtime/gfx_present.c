@@ -93,6 +93,7 @@ double gfx_window_refresh_hz(void) { return plat_cas32(&g_rate_mhz, 0, 0) / 1000
 static PlatRMutex g_pl;
 static VkSwapchainKHR g_sc;
 static VkFormat g_sc_fmt;
+static int g_sc_hdr;                        // HDR10 (TOTK_HDR, vk_hdr.c): PQ code values in Rec. 2020
 static VkExtent2D g_sc_ext;
 static int g_scaler;                        // the last present: 0 the game image 1:1, 1 scaled by the blit, 2 by FSR
 static uint32_t g_sc_n;
@@ -292,9 +293,9 @@ static int create_swapchain(void) {
     if (nf > 64) nf = 64;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, fmts);
     if (!nf) return 0;
-    // UNORM: the blit writes the bytes the game wrote (no sRGB encode).
+    // UNORM: the blit writes the bytes the game wrote (no sRGB encode). TOTK_HDR: HDR10 when the surface offers it.
     VkSurfaceFormatKHR sf = fmts[0];
-    int found = 0;
+    int hdr = vk_hdr_surface_format(fmts, nf, &sf), found = hdr;
     for (uint32_t i = 0; i < nf && !found; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; found = 1; }
     for (uint32_t i = 0; i < nf && !found; i++)
@@ -328,6 +329,9 @@ static int create_swapchain(void) {
     }
     if (old) vkDestroySwapchainKHR(c->device, old, NULL);
     g_sc_fmt = sf.format;
+    g_sc_hdr = hdr;
+    vk_hdr_set_active(hdr);
+    if (hdr) vk_hdr_metadata(g_sc, 1);
     g_sc_ext = ext;
     g_sc_n = MAX_IMAGES;
     vkGetSwapchainImagesKHR(c->device, g_sc, &g_sc_n, g_sc_img);
@@ -411,12 +415,14 @@ static int ensure_thumbs(void) {
         }
         g_th_ptr = info.pMappedData;
     }
-    if (g_th_img && g_th_fmt != g_sc_fmt) {
+    // an HDR10 swapchain blits into RGBA8: its PQ codes, flat-looking but readable as bytes
+    VkFormat tf = g_sc_hdr ? VK_FORMAT_R8G8B8A8_UNORM : g_sc_fmt;
+    if (g_th_img && g_th_fmt != tf) {
         vmaDestroyImage(c->vma, g_th_img, g_th_img_alloc);   // the previous present's fence was waited for: idle
         g_th_img = VK_NULL_HANDLE;
     }
     if (!g_th_img) {
-        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = g_sc_fmt,
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = tf,
                                 .extent = {FLIGHT_THUMB_W, FLIGHT_THUMB_H, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -428,7 +434,7 @@ static int ensure_thumbs(void) {
             rt_log("gfx: flight thumbnails off: no %ux%u image", FLIGHT_THUMB_W, FLIGHT_THUMB_H);
             return 0;
         }
-        g_th_fmt = g_sc_fmt;
+        g_th_fmt = tf;
     }
     return 1;
 }
@@ -502,7 +508,8 @@ static void save_capture(const char *path) {
     uint8_t *px = malloc(n);
     if (!px) return;
     int bgra = g_sc_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_sc_fmt == VK_FORMAT_B8G8R8A8_SRGB;
-    for (size_t i = 0; i < n; i += 4) {
+    if (g_sc_hdr) vk_hdr_to_srgb8(g_cap_ptr, px, n / 4, g_sc_fmt == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+    else for (size_t i = 0; i < n; i += 4) {
         px[i] = g_cap_ptr[i + (bgra ? 2 : 0)];
         px[i + 1] = g_cap_ptr[i + 1];
         px[i + 2] = g_cap_ptr[i + (bgra ? 0 : 2)];
@@ -554,6 +561,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;     // lost, not ready: skip the frame
     if (r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     vkResetFences(c->device, 1, &g_fence[slot]);
+    if (g_sc_hdr) vk_hdr_metadata(g_sc, 0);   // a changed peak or white goes to the display
     if (g_th_pending[slot]) {   // that fence has signalled: the thumbnail its submission wrote is complete
         g_th_tag[g_th_pending[slot] % (uint64_t)g_th_n] = g_th_pending[slot];
         g_th_pending[slot] = 0;
@@ -568,7 +576,8 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     window_settings_live();
     // The menu overlay: laid out before recording (its first frame starts the ImGui back end and uploads the font)
     const char *menu_shot = NULL;
-    MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue, g_sc_fmt, g_sc_ext.width,
+    MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue,
+                     g_sc_hdr ? VK_FORMAT_R8G8B8A8_UNORM : g_sc_fmt, g_sc_ext.width,
                      g_sc_ext.height, cw, ch, g_scaler};
     int overlay = g_sc_view[idx] &&
                   menu_overlay_frame(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &mt, &menu_shot);
@@ -596,8 +605,10 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      VK_ACCESS_2_TRANSFER_WRITE_BIT);
     }
-    // Colour adjustment (TOTK_COLOR_*, vk_color.c): an adjusted copy of the crop takes the game image's place below
-    VkImage graded = general ? vk_color_record(cb, slot, src, fmt, rect) : VK_NULL_HANDLE;
+    // Colour adjustment (TOTK_COLOR_*, vk_color.c), or on an HDR10 swapchain the PQ encode (vk_hdr.c; the adjustment is
+    // for SDR): a copy of the crop takes the game image's place below
+    VkImage graded = !general ? VK_NULL_HANDLE : g_sc_hdr ? vk_hdr_encode(cb, slot, src, fmt, rect)
+                                                         : vk_color_record(cb, slot, src, fmt, rect);
     const int grect[4] = {0, 0, cw, ch};
     VkImage psrc = graded ? graded : src;
     VkFormat pfmt = graded ? VK_FORMAT_R16G16B16A16_SFLOAT : fmt;
@@ -623,18 +634,24 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkImageLayout last = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     VkPipelineStageFlags2 last_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     VkAccessFlags2 last_write = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    // HDR10: the menu goes into vk_hdr.c's RGBA8 image, which is then blended onto the swapchain image at the HUD's white
+    VkImageView menu_view = overlay && g_sc_hdr ? vk_hdr_ui_target(cb, g_sc_ext.width, g_sc_ext.height) : VK_NULL_HANDLE;
+    if (overlay && g_sc_hdr && !menu_view) overlay = 0;
     if (overlay) {
         sync_barrier(cb, dst, last, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, last_stage, last_write,
                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_sc_view[idx],
+        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                        .imageView = menu_view ? menu_view : g_sc_view[idx],
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+                                        .loadOp = menu_view ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
         VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_sc_ext}, .layerCount = 1,
                               .colorAttachmentCount = 1, .pColorAttachments = &ca};
         vkCmdBeginRendering(cb, &ri);
         menu_overlay_draw(cb);
         vkCmdEndRendering(cb);
+        if (menu_view) vk_hdr_ui_compose(cb, g_sc_view[idx], g_sc_fmt, g_sc_ext.width, g_sc_ext.height);
         last = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         last_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         last_write = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -728,6 +745,7 @@ void gfx_window_release_vk(void) {
         menu_vk_release();
         vk_fsr_release();
         vk_color_release();
+        vk_hdr_release();
         free_capture();
         free_thumbs();
         for (int i = 0; i < FRAMES; i++) {

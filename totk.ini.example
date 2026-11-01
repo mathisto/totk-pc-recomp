@@ -170,6 +170,15 @@
 # Read at start.
 # shadow_res = 1024
 
+# HDR output: hdr = 1 sends the picture as HDR10 (needs HDR on in Windows, "Use HDR", or a Wayland compositor with
+# colour management; without it the picture stays SDR). The game's tonemap keeps highlights up to hdr_peak_nits (your
+# display's peak); hdr_game_nits is the picture's white (paper white, 203 is the HDR reference) and hdr_ui_nits the
+# HUD's and the menu's. hdr is read at start, the nits at once. The colour profile above is for SDR only.
+# hdr = 0
+# hdr_peak_nits = 1000
+# hdr_game_nits = 203
+# hdr_ui_nits = 203
+
 [language]
 # Language: a Windows locale such as de-DE, or a Switch code (en-US, ja, zh-Hant, ...). Default: the Windows locale.
 # locale = en-US
