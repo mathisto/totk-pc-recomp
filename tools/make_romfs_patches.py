@@ -30,6 +30,10 @@ the game's own images and glyphs, nothing added:
 - every other prompt is text: the button glyphs U+E040 A, U+E041 B, U+E042 X, U+E043 Y of scft/External.bfotf, the
   same font in each Font/Font*.Nin_NX_NVN.bfarc.zs. Their CFF outlines and horizontal metrics are swapped.
 
+--source <dir> (tools/mods.py deploy): a RomFS-layout folder of merged mods. A file it holds is patched in place of the
+original, so a UI mod's layout archive gets the same fixes and layout; the manifest keeps the original's SHA-256, which
+runtime/romfs.c checks the RomFS against.
+
 Input: build/extracted/<version>/romfs (romfs.bin and index.json, verified by tools/extract.py). Output:
 build/<version>/romfs-patches/<path> by default (romfs-patches-xbox with --xbox-prompts), and <out>/manifest.tsv (path, size, SHA-256 of the overlay, SHA-256 of the original). Run with .venv-py314.
 """
@@ -50,6 +54,8 @@ ap.add_argument('--out', type=Path,
                 help='default build/<version>/romfs-patches (romfs-patches-xbox with --xbox-prompts)')
 ap.add_argument('--aspect', help='<w>x<h> of a game resolution of another shape than 16:9: also lay the UI out for it')
 ap.add_argument('--xbox-prompts', action='store_true', help='swap the A/B and X/Y button prompts as well')
+ap.add_argument('--source', type=Path,
+                help='a RomFS-layout folder (merged mods, tools/mods.py) whose files are patched in place of the originals')
 args = ap.parse_args()
 args.romfs = args.romfs or root / 'build/extracted' / args.version / 'romfs'
 args.out = args.out or root / 'build' / args.version / ('romfs-patches-xbox' if args.xbox_prompts else 'romfs-patches')
@@ -341,9 +347,14 @@ with (args.romfs / 'romfs.bin').open('rb') as image:
         d = zstd.ZstdDict(pack[lo:hi])
         dictionaries[d.dict_id] = d
     originals = {path: read(path) for path in [ARCHIVE] + (FONTS + MALS if args.xbox_prompts else [])}
-raw = originals[ARCHIVE]
+# What gets patched: the original, or with --source a mod's version of the same file. The manifest keeps the
+# original's hash either way, since that is what runtime/romfs.c overlay_load checks the RomFS against.
+inputs = {path: (args.source / path).read_bytes() if args.source and (args.source / path).is_file() else raw
+          for path, raw in originals.items()}
+replaced = sorted(path for path in inputs if inputs[path] is not originals[path])
+raw = inputs[ARCHIVE]
 info = zstd.get_frame_info(raw)
-dictionary = dictionaries[info.dictionary_id]
+dictionary = dictionaries.get(info.dictionary_id)
 original = zstd.decompress(raw, zstd_dict=dictionary)
 blarc = bytearray(original)
 assert len(blarc) == info.decompressed_size
@@ -383,15 +394,15 @@ if args.xbox_prompts:
     outputs[ARCHIVE] = bytes(blarc)
     assert FONTS, 'no Font/Font*.Nin_NX_NVN.bfarc.zs in the RomFS'
     for path in FONTS:
-        frame = zstd.get_frame_info(originals[path])
-        bfarc = zstd.decompress(originals[path], zstd_dict=dictionaries.get(frame.dictionary_id))
+        frame = zstd.get_frame_info(inputs[path])
+        bfarc = zstd.decompress(inputs[path], zstd_dict=dictionaries.get(frame.dictionary_id))
         lo, hi = sarc_members(bfarc)['scft/External.bfotf']
         outputs[path] = sarc_replace(bfarc, {'scft/External.bfotf': bfotf_swap(bfarc[lo:hi], KEY_GLYPHS)})
     assert MALS, 'no Mals/<language>.Product.<version>.sarc.zs in the RomFS'
     messages = {}
     for path in MALS:
-        frame = zstd.get_frame_info(originals[path])
-        mals = bytearray(zstd.decompress(originals[path], zstd_dict=dictionaries.get(frame.dictionary_id)))
+        frame = zstd.get_frame_info(inputs[path])
+        mals = bytearray(zstd.decompress(inputs[path], zstd_dict=dictionaries.get(frame.dictionary_id)))
         lo, hi = sarc_members(mals)[LAYOUT_MSG]
         msbt = bytearray(mals[lo:hi])
         changed = msbt_letters(msbt, KEY_LETTERS)
@@ -413,7 +424,7 @@ for path, contents in outputs.items():
     lines.append('\t'.join([path, str(len(data)), hashlib.sha256(data).hexdigest(), hashlib.sha256(raw).hexdigest()]))
 (args.out / 'manifest.tsv').write_text('# path\tsize\tsha256\toriginal_sha256 (tools/make_romfs_patches.py)\n'
                                        + ''.join(line + '\n' for line in lines))
-print(json.dumps(dict(status='pass', path=ARCHIVE, members=patched, changed_bytes=len(diff),
+print(json.dumps(dict(status='pass', path=ARCHIVE, members=patched, changed_bytes=len(diff), from_source=replaced,
                       ultrawide_layout=dict(aspect=args.aspect, members=len(layout)) if args.aspect else None,
                       xbox_prompts=dict(textures=KEY_TEXTURES, letters=letters, messages=messages, fonts=FONTS)
                       if args.xbox_prompts else None)))

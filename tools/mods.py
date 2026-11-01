@@ -10,8 +10,10 @@ totk.exe loads one patch overlay (romfs-patches, or romfs-patches-<w>x<h> for a 
 stops when two overlays replace the same file. So deploy writes <install>/mods-overlay with both: the port's own patch
 set for the game resolution, then every merged mod file, and a manifest.tsv that lists each with its size, its
 SHA-256 and the SHA-256 of the RomFS original it replaces ("-" for a file the RomFS lacks). It then sets romfs_patches
-in totk.ini to that folder. A mod file that replaces a file the port patches stops the deploy: the port's patch would
-have to be made again on top of the mod's version (tools/make_romfs_patches.py), which this step does not do yet.
+in totk.ini to that folder. When the mods replace files the port patches (a UI mod rewriting the Common layout archive,
+say), deploy makes the port's patch set again on top of the mods' versions (tools/make_romfs_patches.py --source, in the
+same shape: the game resolution's layout or the Xbox prompts) and uses that in place of both. That step needs Python
+3.14 (--patch-python).
 
 The originals' hashes come from romfs/romfs.bin through romfs/index.json, read only for the files the mods replace.
 undeploy removes the folder and the totk.ini line. Standard library only.
@@ -21,6 +23,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -109,10 +112,17 @@ def deploy(args):
     mod_files = sorted((p.relative_to(mod_romfs).as_posix(), p) for p in mod_romfs.rglob('*') if p.is_file())
     junk = [rel for rel, _ in mod_files if Path(rel).name.lower() in ('desktop.ini', 'thumbs.db', '.ds_store')]
     mod_files = [(rel, p) for rel, p in mod_files if rel not in junk]
+    port_dir = {rel: port for rel in port_lines}
     clashes = [rel for rel, _ in mod_files if rel in port_lines]
+    repatched = []
     if clashes:
-        raise SystemExit('these mod files replace files the port patches itself, which deploy cannot combine yet:\n  '
-                         + '\n  '.join(clashes))
+        port_lines, port_dir = repatch(args, install, port, mod_romfs, port_lines, port_dir)
+        repatched = sorted(rel for rel in clashes if port_dir[rel] != port)
+        left = [rel for rel in clashes if port_dir[rel] == port]
+        if left:
+            raise SystemExit('these mod files replace files the port patches, and patching them again did not cover '
+                             'them:\n  ' + '\n  '.join(left))
+        mod_files = [(rel, p) for rel, p in mod_files if rel not in port_lines]
 
     out = install / OVERLAY
     if out.exists():
@@ -123,7 +133,7 @@ def deploy(args):
     for rel, line in port_lines.items():
         target = out / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(port / rel, target)
+        shutil.copy2(port_dir[rel] / rel, target)
         lines.append(line)
 
     replaced = added = 0
@@ -144,11 +154,43 @@ def deploy(args):
     (out / 'manifest.tsv').write_text('# path\tsize\tsha256\toriginal_sha256 (tools/mods.py deploy)\n'
                                       + ''.join(line + '\n' for line in lines), encoding='utf-8', newline='\n')
     set_ini(install / 'totk.ini', INI_KEY, str(out))
+    if (install / f'{OVERLAY}.repatch').exists():
+        shutil.rmtree(install / f'{OVERLAY}.repatch')
 
     skipped = sorted(p.relative_to(merged).as_posix() for d in ('exefs', 'exefs_patches') if (merged / d).is_dir()
                      for p in (merged / d).rglob('*') if p.is_file())
     print(json.dumps(dict(status='pass', overlay=str(out), port_patches=port.name, port_files=len(port_lines),
-                          replaced=replaced, added=added, junk_skipped=junk, code_not_applied=skipped), indent=1))
+                          repatched_on_mods=repatched, replaced=replaced, added=added, junk_skipped=junk,
+                          code_not_applied=skipped), indent=1))
+
+
+def repatch(args, install, port, mod_romfs, port_lines, port_dir):
+    """Makes the port's patch set again with the mods' versions of its files as input (make_romfs_patches.py --source),
+    in the same shape as `port` (its game resolution or the Xbox prompts). Returns the manifest lines and source
+    folder of each patched file, the new ones in place of the port's."""
+    python = args.patch_python or (sys.executable if sys.version_info >= (3, 14) else None)
+    if not python:
+        raise SystemExit('mod files replace files the port patches; patching them again needs Python 3.14 '
+                         '(compression.zstd): pass --patch-python, e.g. the setup\'s python\\python.exe or .venv-py314')
+    record = json.loads((install / 'totk-install.json').read_text(encoding='utf-8'))
+    version = 'v' + record['version'].replace('.', '')
+    shape = port.name.removeprefix('romfs-patches').removeprefix('-')
+    work = install / f'{OVERLAY}.repatch'
+    if work.exists():
+        shutil.rmtree(work)
+    command = [python, '-I', str(Path(__file__).with_name('make_romfs_patches.py')), '--version', version,
+               '--romfs', str(install / 'romfs'), '--source', str(mod_romfs), '--out', str(work)]
+    if shape == 'xbox':
+        command.append('--xbox-prompts')
+    elif shape:
+        command += ['--aspect', shape]
+    done = subprocess.run(command, capture_output=True, text=True)
+    if done.returncode:
+        raise SystemExit(f'make_romfs_patches.py --source failed ({done.returncode}):\n{done.stdout}{done.stderr}')
+    lines, dirs = dict(port_lines), dict(port_dir)
+    for rel, line in read_manifest(work).items():
+        lines[rel], dirs[rel] = line, work
+    return lines, dirs
 
 
 def undeploy(args):
@@ -167,6 +209,8 @@ def main():
     d.add_argument('--install', type=Path, required=True)
     d.add_argument('--merged', type=Path, required=True)
     d.add_argument('--res', help='game resolution WxH (default: output_res of totk.ini)')
+    d.add_argument('--patch-python', help='Python 3.14 for make_romfs_patches.py when mods replace files the port '
+                                          'patches (default: this Python when it is 3.14 or newer)')
     u = sub.add_parser('undeploy')
     u.add_argument('--install', type=Path, required=True)
     args = ap.parse_args()
