@@ -11,6 +11,7 @@
 #include <string.h>
 #include <windows.h>
 #include <imm.h>
+#include <shellapi.h>
 
 #include "cfg.h"
 #include "flight.h"
@@ -271,6 +272,16 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
     }
+    case WM_DROPFILES: {   // a file dropped on the window: the Mods tab's install card (menu.cpp menu_drop_file)
+        HDROP d = (HDROP)w;
+        wchar_t p[MAX_PATH];
+        char u[MAX_PATH * 3];
+        if (DragQueryFileW(d, 0, NULL, 0) < MAX_PATH && DragQueryFileW(d, 0, p, MAX_PATH) &&
+            WideCharToMultiByte(CP_UTF8, 0, p, -1, u, sizeof u, NULL, NULL))
+            menu_drop_file(u);
+        DragFinish(d);
+        return 0;
+    }
     case WM_CLOSE:
         gfx_window_closed();
     case WM_ERASEBKGND:
@@ -310,6 +321,7 @@ static void window_main(void *arg) {
         // Detaching the game's window leaves the software keyboard alone: its edit box sits in a window of its own
         // (swkbd_win.c) and gets the IME it needs.
         ImmAssociateContext(g_hwnd, NULL);
+        DragAcceptFiles(g_hwnd, TRUE);   // mod packages dropped on the window go to the Mods tab
         // The frame was measured at the system DPI; the window may have opened on a monitor at another scale.
         plat_xchg32(&g_dpi, (int32_t)GetDpiForWindow(g_hwnd));
         outer_size(g_hwnd, cw, ch, &ow, &oh);

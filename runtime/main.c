@@ -471,6 +471,7 @@ static void portable_paths(RtConfig *c) {
 }
 
 int main(int argc, char **argv) {
+    plat_launch_sealed();   // Windows: the game itself runs in a child whose guest window was sealed before it started
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);

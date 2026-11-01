@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fuse_hooks.h"
 #include "host.h"
 #include "layout.h"
 #include "platform/platform.h"
@@ -49,10 +50,14 @@ typedef struct {
     uint64_t kinds[K_COUNT], sym_import, sym_own;
     uint32_t imports, import_to[MOD_COUNT], weak_unresolved, strong_unresolved;
     uint32_t init_off;
+    char bid[65];                       // the NSO's module id (build id), upper-case hex
 } Mod;
 
 static Mod mods[MOD_COUNT];
 static int nmods;
+static int fuse_patches;   // ldr_enable_fuse_patches: a real boot, not a probe mode
+
+void ldr_enable_fuse_patches(void) { fuse_patches = 1; }
 static uint64_t identity_refs, stubs;
 static int *ovr_used, *obs_used;   // per linked table entry, plus probe overrides counted separately
 static PlatMutex plt_lock = PLAT_MUTEX_INIT;
@@ -289,6 +294,7 @@ static void load_module(Mod *m, const char *dir, const RtLayoutEntry *lay) {
         m->seg_off[i] = seg[i].mem_off;
         m->seg_size[i] = seg[i].size;
     }
+    for (int i = 0; i < 32; i++) snprintf(m->bid + 2 * i, 3, "%02X", raw[0x40 + i]);
     free(raw);
     m->pub.name = lay->name;
     m->pub.base = lay->base;
@@ -447,6 +453,15 @@ void ldr_load(const char *exefs_dir) {
     if (rt_layout_count > MOD_COUNT) rt_fatal("loader: %d modules in the layout", rt_layout_count);
     for (int i = 0; i < rt_layout_count; i++) load_module(&mods[i], exefs_dir, &rt_layout[i]);
     nmods = rt_layout_count;
+    if (fuse_patches) {   // before relocation, as a Switch loader patches an NSO before rtld runs
+        FzPatchModule pm[MOD_COUNT];
+        for (int i = 0; i < nmods; i++) {
+            pm[i] = (FzPatchModule){mods[i].pub.name, mods[i].pub.base, mods[i].pub.text_end,
+                                    (uint64_t)mods[i].seg_off[2] + mods[i].seg_size[2], ""};
+            memcpy(pm[i].bid, mods[i].bid, sizeof pm[i].bid);
+        }
+        fz_patches_apply(pm, nmods);
+    }
     ovr_used = calloc(hostfn_table_size(0) + 1, sizeof(int));
     obs_used = calloc(hostfn_table_size(1) + 1, sizeof(int));
     for (int i = 0; i < nmods; i++) {

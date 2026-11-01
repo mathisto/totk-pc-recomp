@@ -369,13 +369,13 @@ class Emitter:
             cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in range(entry, end, 4))
             redispatch = f'{MUSTTAIL} {fb}(c);'
             out = [f'static void {fb}(Cpu *c);',
-                   f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)}, {self.ordinal[entry]});', f'    c->pc = {hx(entry)};',
+                   f'FN_ATTR void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)}, {self.ordinal[entry]});', f'    c->pc = {hx(entry)};',
                    f'    {redispatch}', '}',
                    f'static void {fb}(Cpu *c) {{', f'    switch (c->pc) {{ {cases} default: break; }}',
                    f'    {MUSTTAIL} rt_dispatch(c);']
         else:
             redispatch = f'{MUSTTAIL} rt_dispatch(c);'
-            out = [f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)}, {self.ordinal[entry]});']
+            out = [f'FN_ATTR void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)}, {self.ordinal[entry]});']
             if fp.used:
                 out.append('    ' + fp.decl())
 

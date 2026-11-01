@@ -330,7 +330,7 @@ class Lifter:
             raise Unsupported(f'pstate/system {w:08x}')
         if op0 == 1:  # SYS
             if not L and op1 == 3 and crn == 7 and crm == 4 and op2 == 1:  # DC ZVA
-                return Insn('op', f'memset((void*)(uintptr_t)({X(rt)} & ~63ull), 0, 64);')
+                return Insn('op', f'memset((void*)(uintptr_t)GA({X(rt)} & ~63ull), 0, 64);')
             return Insn('op', '/* cache maintenance */')
         key = (op0, op1, crn, crm, op2)
         if L:  # MRS
@@ -433,7 +433,7 @@ class Lifter:
     def cas(self, size, rs, rt, addr):
         """CAS{A}{L}{B,H}: Rs is the compare value and receives the old memory value."""
         t = f'uint{8 << size}_t'
-        return Insn('op', f'{{ {t} e = ({t}){X(rs)}; __atomic_compare_exchange_n(({t} *)(uintptr_t)({addr}), &e, '
+        return Insn('op', f'{{ {t} e = ({t}){X(rs)}; __atomic_compare_exchange_n(({t} *)(uintptr_t)GA({addr}), &e, '
                           f'({t}){X(rt)}, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); {set_reg(size == 3, rs, "e")} }}')
 
     def casp(self, sz, rs, rt, addr):
@@ -450,7 +450,7 @@ class Lifter:
             e = f'(uint64_t){W(rs)} | ((uint64_t){W(rs + 1)} << 32)'
             v = f'(uint64_t){W(rt)} | ((uint64_t){W(rt + 1)} << 32)'
             lo, hi = set_reg(0, rs, 'e'), set_reg(0, rs + 1, 'e >> 32')
-        return Insn('op', f'{{ {t} e = {e}; __atomic_compare_exchange_n(({t} *)(uintptr_t)({addr}), &e, {v}, 0, '
+        return Insn('op', f'{{ {t} e = {e}; __atomic_compare_exchange_n(({t} *)(uintptr_t)GA({addr}), &e, {v}, 0, '
                           f'__ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); {lo} {hi} }}')
 
     def atomic(self, w):
@@ -459,7 +459,7 @@ class Lifter:
                                            bits(w, 15, 1), bits(w, 12, 3), bits(w, 5, 5), bits(w, 0, 5))
         nbits = 8 << size
         t = f'uint{nbits}_t'
-        p, v = f'({t} *)(uintptr_t)({XS(rn)})', f'({t}){X(rs)}'
+        p, v = f'({t} *)(uintptr_t)GA({XS(rn)})', f'({t}){X(rs)}'
         order = ('__ATOMIC_RELAXED', '__ATOMIC_RELEASE', '__ATOMIC_ACQUIRE', '__ATOMIC_ACQ_REL')[A << 1 | R]
         if o3:
             if opc:

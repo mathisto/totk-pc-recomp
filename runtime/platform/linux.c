@@ -875,6 +875,59 @@ int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
     return 1;
 }
 
+void plat_launch_sealed(void) {}   // Linux: mem_init's sealing only (see memory.c)
+int plat_sealed_launch(void) { return 0; }
+
+uint64_t plat_mem_seal_below(uint64_t limit, void (*in_use)(uint64_t base, uint64_t size, void *user), void *user) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    uint64_t prev = 0x10000, sealed = 0;   // the kernel keeps the lowest 64 KiB unmappable
+    char line[512];
+    for (;;) {
+        unsigned long long lo = limit, hi = limit;
+        int more = fgets(line, sizeof line, f) && sscanf(line, "%llx-%llx", &lo, &hi) == 2;
+        if (!more) lo = hi = limit;
+        uint64_t gap_hi = lo < limit ? lo : limit;
+        if (gap_hi > prev) {
+            void *p = mmap((void *)(uintptr_t)prev, gap_hi - prev, PROT_NONE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+            if (p != MAP_FAILED) sealed += gap_hi - prev;
+        }
+        if (!more || lo >= limit) break;
+        if (in_use) in_use(lo, (hi < limit ? hi : limit) - lo, user);
+        if (hi > prev) prev = hi;
+    }
+    fclose(f);
+    return sealed;
+}
+
+void *plat_code_alloc_near(const void *close_to, size_t n) {
+    uint64_t g = 1u << 16, c = (uint64_t)(uintptr_t)close_to & ~(g - 1);
+    for (uint64_t d = g; d < (1ull << 30); d += g)
+        for (int below = 1; below >= 0; below--) {
+            uint64_t a = below ? c - d : c + d;
+            void *p = mmap((void *)(uintptr_t)a, n, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                           -1, 0);
+            if (p != MAP_FAILED) return p;
+        }
+    return NULL;
+}
+
+int plat_code_write(void *dst, const void *src, size_t n) {
+    uintptr_t lo = (uintptr_t)dst & ~(uintptr_t)(PG - 1), hi = ((uintptr_t)dst + n + PG - 1) & ~(uintptr_t)(PG - 1);
+    if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE | PROT_EXEC)) return 0;
+    if (n == 2) {
+        uint16_t v;
+        memcpy(&v, src, 2);
+        __asm__ volatile("movw %w1, (%0)" : : "r"(dst), "r"(v) : "memory");
+    } else {
+        memcpy(dst, src, n);
+    }
+    mprotect((void *)lo, hi - lo, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache((char *)dst, (char *)dst + n);
+    return 1;
+}
+
 int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
     if (!pstate || addr >= PS_LIMIT) {
         *end = limit;

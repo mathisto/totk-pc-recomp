@@ -143,7 +143,9 @@ uint32_t mem_query(uint64_t a, RtMemoryInfo *out);                              
 int mem_guest_access(uint64_t a, uint64_t n, int write);   // [a, a+n) is guest memory the guest may read (write:
                                                            // write): its heap, alias region, stack, thread-local
                                                            // region or a loaded module's pages with that permission.
-                                                           // Never host memory (Fuse scripts, DevLink)
+                                                           // Never host memory (native Fuse plugins)
+int mem_script_access(uint64_t a, uint64_t n, int write);  // the same for untrusted callers (Fuse scripts, DevLink):
+                                                           // also never writes the kernel region, the runtime's arena
 uint32_t mem_map_physical(uint64_t a, uint64_t n);                              // 0x2C
 uint32_t mem_unmap_physical(uint64_t a, uint64_t n);                            // 0x2D
 int mem_info(uint32_t id, uint64_t *out);                  // GetInfo memory ids 2-7, 12-17, 21, 22, 28; 0 if not a memory id
@@ -175,6 +177,7 @@ typedef struct {
     uint64_t init, init_array, init_array_size, ctor_flag;  // absolute guest addresses; init_array_size in bytes
 } RtLoaded;
 void ldr_load(const char *exefs_dir);                      // load, relocate (overrides applied), seal; once
+void ldr_enable_fuse_patches(void);                        // before ldr_load: apply deployed Fuse patches (rt_boot)
 int ldr_count(void);
 const RtLoaded *ldr_module(int i);                         // order: main, subsdk0, sdk
 uint64_t ldr_symbol(const char *name);                     // exported definition, 0 if none

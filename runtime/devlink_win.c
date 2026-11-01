@@ -2,7 +2,7 @@
 //
 // - One thread accepts loopback connections; the first request on a connection must be {"method":"auth","params":
 //   {"token":...}} with the token from <profile>/devlink.json ({host, port, token, pid, version}, rewritten each launch).
-// - Requests run on the DevLink thread. Memory reads and writes reach guest memory only (mem_guest_access); the game
+// - Requests run on the DevLink thread. Memory reads and writes reach guest memory only (mem_script_access); the game
 //   keeps running meanwhile, so a read is a snapshot. A screenshot waits for the next present.
 // - Methods: auth, ping, log, cfg_get, cfg_set, patch, read, write, name, hook, hooks, shot, input, lua, script_reload,
 //   notify, quit.
@@ -13,6 +13,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <sddl.h>
+#include <io.h>
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -93,17 +95,40 @@ static void put_str(Buf *b, const char *s, size_t n) {   // a JSON string litera
     put(b, "\"", 1);
 }
 
-// The value of "key" anywhere in the request line (keys are unique in DevLink requests): a string (unescaped into out)
-// or a bare token (number, true, false, null). 1 when found.
+// Where the value of "key" starts, for a key at object depth `depth` (1: the request, 2: its params), skipping every
+// string so a key is never matched inside a value. NULL when absent or the line ends inside a string.
+static const char *json_find(const char *p, const char *key, int depth) {
+    size_t kl = strlen(key);
+    int d = 0;
+    while (*p) {
+        if (*p == '"') {
+            const char *s = ++p;
+            while (*p && *p != '"') p += (*p == '\\' && p[1]) ? 2 : 1;
+            if (!*p) return NULL;
+            const char *e = p++;
+            if (d == depth && (size_t)(e - s) == kl && !memcmp(s, key, kl)) {
+                while (*p == ' ' || *p == '\t') p++;
+                if (*p == ':') {
+                    for (p++; *p == ' ' || *p == '\t'; p++) {}
+                    return p;
+                }
+            }
+            continue;
+        }
+        if (*p == '{' || *p == '[') d++;
+        else if (*p == '}' || *p == ']') d--;
+        p++;
+    }
+    return NULL;
+}
+
+static int top_level(const char *key) { return !strcmp(key, "id") || !strcmp(key, "method") || !strcmp(key, "jsonrpc"); }
+
+// The value of "key" (id, method and jsonrpc in the request object, the rest in params): a string (unescaped into
+// out) or a bare token (number, true, false, null). 1 when found.
 static int json_get(const char *line, const char *key, char *out, size_t cap) {
-    char pat[64];
-    snprintf(pat, sizeof pat, "\"%s\"", key);
-    const char *p = strstr(line, pat);
+    const char *p = json_find(line, key, top_level(key) ? 1 : 2);
     if (!p) return 0;
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p++ != ':') return 0;
-    while (*p == ' ' || *p == '\t') p++;
     size_t n = 0;
     if (*p == '"') {
         for (p++; *p && *p != '"' && n + 1 < cap; p++) {
@@ -126,9 +151,9 @@ static uint64_t json_u64(const char *line, const char *key, uint64_t def) {
     return json_get(line, key, v, sizeof v) ? strtoull(v, NULL, 0) : def;
 }
 
-// ---- guest memory, checked: the guest's own memory only (mem_guest_access), never the runtime's
+// ---- guest memory, checked: the guest's own memory only (mem_script_access), never the runtime's
 
-static int readable(uint64_t a, size_t n, int write) { return mem_guest_access(a, n, write); }
+static int readable(uint64_t a, size_t n, int write) { return mem_script_access(a, n, write); }
 
 // ---- built-in hooks for exploring: count calls, or also log the first arguments (rate-limited)
 
@@ -240,8 +265,45 @@ static int method(const char *line, const char *name, Buf *r) {
             put(r, "}", 1);
         }
         put(r, "]}", 2);
-    } else if (!strcmp(name, "shot")) {   // {path}: PNG of the next presented frame (waits up to 5 s)
+    } else if (!strcmp(name, "mods")) {   // the script mods' cost per frame (fz_luau_stats), most expensive first
+        FzModStat st[64];
+        float budget = 0;
+        int n = fz_luau_stats(st, 64, &budget);
+        static const char *const states[] = {"ok", "busy", "paused"};
+        putf(r, "{\"budget_ms\":%.3f,\"mods\":[", budget);
+        for (int i = 0; i < n; i++) {
+            put(r, i ? ",{\"id\":" : "{\"id\":", i ? 7 : 6);
+            put_str(r, st[i].id, strlen(st[i].id));
+            putf(r, ",\"avg_ms\":%.4f,\"max_ms\":%.4f,\"calls\":%u,\"hooks\":%u,\"handlers\":%u,\"state\":\"%s\"}",
+                 st[i].avg_ms, st[i].max_ms, st[i].calls, st[i].hooks, st[i].handlers, states[st[i].status]);
+        }
+        put(r, "]}", 2);
+    } else if (!strcmp(name, "drop")) {   // {path}: as if that file were dropped on the window (the Mods tab's card)
         if (!json_get(line, "path", v, sizeof v)) return -32602;
+        menu_drop_file(v);
+        put(r, "{\"ok\":true}", 11);
+    } else if (!strcmp(name, "mod_enable")) {   // {package, on}: the Mods tab's switch for a deployed script mod
+        if (!json_get(line, "package", v, sizeof v)) return -32602;
+        char on[16] = "true";
+        json_get(line, "on", on, sizeof on);
+        int want = strcmp(on, "false") && strcmp(on, "0");
+        if (fz_luau_set_enabled(v, want)) return -32602;
+        putf(r, "{\"package\":");
+        put_str(r, v, strlen(v));
+        putf(r, ",\"on\":%s}", want ? "true" : "false");
+    } else if (!strcmp(name, "shot")) {   // {name}: PNG of the next presented frame, as <profile>/shots/<name>
+        // (waits up to 5 s). A bare file name only, so a client cannot write anywhere else.
+        if (!json_get(line, "name", v, sizeof v) && !json_get(line, "path", v, sizeof v)) return -32602;
+        size_t vl = strlen(v);
+        if (!vl || vl > 64 || strspn(v, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != vl ||
+            v[0] == '.' || vl < 5 || _stricmp(v + vl - 4, ".png")) return -32602;
+        const RtConfig *cfg = rt_config();
+        char dir[PLAT_PATH_MAX];
+        snprintf(dir, sizeof dir, "%s/shots", cfg && cfg->profile ? cfg->profile : ".");
+        CreateDirectoryA(dir, NULL);
+        char full[PLAT_PATH_MAX];
+        snprintf(full, sizeof full, "%s/%s", dir, v);
+        snprintf(v, sizeof v, "%s", full);
         volatile int done = 0;
         rt_shot_request(v, &done);
         for (int i = 0; i < 500 && !done; i++) Sleep(10);
@@ -313,7 +375,9 @@ static void reply(SOCKET s, const char *line, Buf *r, int code) {
     char id[64] = "null";
     json_get(line, "id", id, sizeof id);
     Buf out = {0};
-    int str = strstr(line, "\"id\":\"") || strstr(line, "\"id\": \"");
+    const char *idv = json_find(line, "id", 1);
+    int str = idv && *idv == '"';
+    if (!str && strspn(id, "0123456789-") != strlen(id)) snprintf(id, sizeof id, "null");
     put(&out, "{\"jsonrpc\":\"2.0\",\"id\":", 22);
     if (str) put_str(&out, id, strlen(id)); else put(&out, id, strlen(id));
     if (code) putf(&out, ",\"error\":{\"code\":%d,\"message\":\"%s\"}}\n", code, error_text(code));
@@ -400,8 +464,20 @@ void devlink_init(void) {
     char path[PLAT_PATH_MAX];
     const RtConfig *cfg = rt_config();
     snprintf(path, sizeof path, "%s/devlink.json", cfg && cfg->profile ? cfg->profile : ".");
-    FILE *f = fopen(path, "w");
-    if (!f) { rt_log("devlink: cannot write %s", path); return; }
+    // Owner-only: the file holds the bearer token. A protected DACL granting the current user (owner rights) alone.
+    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, FALSE};
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorA("D:P(A;;FA;;;OW)", SDDL_REVISION_1,
+                                                              &sa.lpSecurityDescriptor, NULL)) {
+        rt_log("devlink: cannot build the handshake ACL (%lu)", GetLastError());
+        return;
+    }
+    DeleteFileA(path);   // a new file takes the ACL; overwriting an old one keeps the old ACL
+    HANDLE hf = CreateFileA(path, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    LocalFree(sa.lpSecurityDescriptor);
+    if (hf == INVALID_HANDLE_VALUE) { rt_log("devlink: cannot write %s", path); return; }
+    int fd = _open_osfhandle((intptr_t)hf, 0);
+    FILE *f = fd >= 0 ? _fdopen(fd, "w") : NULL;
+    if (!f) { CloseHandle(hf); rt_log("devlink: cannot write %s", path); return; }
     fprintf(f, "{\"host\":\"127.0.0.1\",\"port\":%u,\"token\":\"%s\",\"pid\":%lu,\"version\":\"" DL_VERSION "\"}\n",
             (unsigned)ntohs(a.sin_port), token, (unsigned long)GetCurrentProcessId());
     fclose(f);

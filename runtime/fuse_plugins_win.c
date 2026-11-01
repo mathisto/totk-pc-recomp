@@ -1,5 +1,6 @@
 // Fuse native plugins (see fuse_plugin.h): DLLs from TOTK_FUSE_PLUGINS, loaded at start only with TOTK_FUSE_NATIVE=1.
-// Each gets the FzApi table; its log lines carry its file name. Plugins are never unloaded (their hooks may be running
+// A folder the fuse CLI deployed into loads exactly the plugins its .fuse-deploy.json lists, each hash-checked; any
+// other folder loads its *.dll by name (an author's own builds). Each gets the FzApi table; its log lines carry its name. Plugins are never unloaded (their hooks may be running
 // on any guest thread), so changing one means a restart.
 #include <windows.h>
 #include <psapi.h>
@@ -23,8 +24,18 @@ static char names[FZ_PLUGINS][64];   // file names, for log lines
 static int nplugins;
 static __thread int current = -1;    // the plugin whose init is running (its log prefix)
 
-static void api_log(const char *text) {
-    rt_log("plugin %s: %s", current >= 0 ? names[current] : "?", text ? text : "");
+// Prefixed with the plugin's name: during its init the one loading, afterwards (a hook calling back) the DLL that the
+// call came from.
+__attribute__((noinline)) static void api_log(const char *text) {
+    char who[160];
+    if (current >= 0) {
+        snprintf(who, sizeof who, "%s", names[current]);
+    } else {
+        fz_owner_name(__builtin_return_address(0), who, sizeof who);
+        char *plus = strchr(who, '+');
+        if (plus) *plus = 0;
+    }
+    rt_log("plugin %s: %s", who, text ? text : "");
 }
 
 static uint64_t api_get_x(const FzCpu *c, int i) { return i >= 0 && i <= 30 ? ((const Cpu *)c)->x[i] : 0; }
@@ -92,14 +103,91 @@ const char *fz_owner_name(const void *fn, char *buf, size_t cap) {
     return buf;
 }
 
+// Loads one plugin DLL and runs its init. want: the SHA-256 it must have (a deployed plugin), or NULL. The file is
+// opened with write and delete sharing denied while it is hashed and loaded, so it cannot change in between.
+static void load_plugin(const char *path, const char *shown, const char *want) {
+    if (nplugins == FZ_PLUGINS) {
+        rt_log("fuse: more than %d plugins; %s skipped", FZ_PLUGINS, shown);
+        return;
+    }
+    HANDLE pin = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (pin == INVALID_HANDLE_VALUE) {
+        rt_log("fuse: plugin %s cannot be opened (error %lu)", shown, GetLastError());
+        return;
+    }
+    if (want) {
+        LARGE_INTEGER sz;
+        void *buf = NULL;
+        DWORD got = 0;
+        int ok = GetFileSizeEx(pin, &sz) && sz.QuadPart > 0 && sz.QuadPart < (256ll << 20) &&
+                 (buf = malloc((size_t)sz.QuadPart)) && ReadFile(pin, buf, (DWORD)sz.QuadPart, &got, NULL) &&
+                 got == (DWORD)sz.QuadPart && fz_file_sha256_hex(buf, got, want);
+        free(buf);
+        if (!ok) {
+            rt_log("fuse: plugin %s changed since it was deployed (or cannot be read); not loaded", shown);
+            CloseHandle(pin);
+            return;
+        }
+    }
+    HMODULE m = LoadLibraryExA(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    CloseHandle(pin);
+    if (!m) {
+        rt_log("fuse: plugin %s did not load (error %lu)", shown, GetLastError());
+        return;
+    }
+    MODULEINFO mi;
+    if (GetModuleInformation(GetCurrentProcess(), m, &mi, sizeof mi)) plat_crash_watch(mi.lpBaseOfDll, mi.SizeOfImage);
+    FzPluginInit init = (FzPluginInit)(void *)GetProcAddress(m, "fz_plugin_init");
+    if (!init) {
+        rt_log("fuse: plugin %s exports no fz_plugin_init; unloaded", shown);
+        FreeLibrary(m);
+        return;
+    }
+    int k = nplugins++;
+    snprintf(names[k], sizeof names[k], "%s", shown);
+    current = k;
+    int rc = init(&api);
+    current = -1;
+    if (rc) {
+        rt_log("fuse: plugin %s refused to start (%d)", shown, rc);
+        nplugins--;   // its hooks, if any, stay: a plugin that refuses must not have attached any
+    } else {
+        rt_log("fuse: plugin %s loaded", shown);
+    }
+}
+
+static void load_deployed_plugin(const char *id, const char *path, const char *sha, void *user) {
+    char full[MAX_PATH], shown[200];
+    snprintf(full, sizeof full, "%s\\%s\\%s", (const char *)user, id, path);
+    for (char *c = full; *c; c++)
+        if (*c == '/') *c = '\\';
+    snprintf(shown, sizeof shown, "%s/%s", id, path);
+    load_plugin(full, shown, sha);
+}
+
 void fz_plugins_init(void) {
     const char *dir = cfg_get("TOTK_FUSE_PLUGINS");
     if (!dir || !*dir) return;
+    // 1: deployed plugins only (each pinned by hash in .fuse-deploy.json). dev: also a folder of loose DLLs, for an
+    // author's own builds.
     const char *native = cfg_get("TOTK_FUSE_NATIVE");
-    if (!native || strcmp(native, "1")) {
+    int dev = native && !strcmp(native, "dev");
+    if (!native || (strcmp(native, "1") && !dev)) {
         rt_log("fuse: TOTK_FUSE_PLUGINS is set but native mods are off (TOTK_FUSE_NATIVE=1 turns them on); no plugin loads");
         return;
     }
+    // A folder the fuse CLI deployed into: exactly the listed plugins, hash-checked, in load order.
+    int n = fz_deployed_files(dir, ".dll", load_deployed_plugin, (void *)dir);
+    if (n >= 0) {
+        rt_log("fuse: %s: %d deployed plugins (.fuse-deploy.json)", dir, n);
+        return;
+    }
+    if (!dev) {
+        rt_log("fuse: %s has no .fuse-deploy.json; loose plugins load only with TOTK_FUSE_NATIVE=dev", dir);
+        return;
+    }
+    // Any other folder (an author's own builds, TOTK_FUSE_NATIVE=dev): every *.dll in it, by name.
+    rt_log("fuse: TOTK_FUSE_NATIVE=dev: loading unpinned plugins from %s", dir);
     char pat[MAX_PATH];
     snprintf(pat, sizeof pat, "%s\\*.dll", dir);
     WIN32_FIND_DATAA fd;
@@ -107,36 +195,9 @@ void fz_plugins_init(void) {
     if (f == INVALID_HANDLE_VALUE) return;
     do {
         if (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) continue;
-        if (nplugins == FZ_PLUGINS) {
-            rt_log("fuse: more than %d plugins; the rest are skipped", FZ_PLUGINS);
-            break;
-        }
         char path[MAX_PATH];
         snprintf(path, sizeof path, "%s\\%s", dir, fd.cFileName);
-        HMODULE m = LoadLibraryExA(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!m) {
-            rt_log("fuse: plugin %s did not load (error %lu)", fd.cFileName, GetLastError());
-            continue;
-        }
-        MODULEINFO mi;
-        if (GetModuleInformation(GetCurrentProcess(), m, &mi, sizeof mi)) plat_crash_watch(mi.lpBaseOfDll, mi.SizeOfImage);
-        FzPluginInit init = (FzPluginInit)(void *)GetProcAddress(m, "fz_plugin_init");
-        if (!init) {
-            rt_log("fuse: plugin %s exports no fz_plugin_init; unloaded", fd.cFileName);
-            FreeLibrary(m);
-            continue;
-        }
-        int k = nplugins++;
-        snprintf(names[k], sizeof names[k], "%s", fd.cFileName);
-        current = k;
-        int rc = init(&api);
-        current = -1;
-        if (rc) {
-            rt_log("fuse: plugin %s refused to start (%d)", fd.cFileName, rc);
-            nplugins--;   // its hooks, if any, stay: a plugin that refuses must not have attached any
-        } else {
-            rt_log("fuse: plugin %s loaded", fd.cFileName);
-        }
+        load_plugin(path, fd.cFileName, NULL);
     } while (FindNextFileA(f, &fd));
     FindClose(f);
 }

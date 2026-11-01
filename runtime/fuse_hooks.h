@@ -18,6 +18,7 @@
 #include <stddef.h>
 
 #include "cpu.h"
+#include "fuse_stats.h"
 
 typedef int (*fz_before_fn)(Cpu *c, void *user);
 typedef void (*fz_after_fn)(Cpu *c, void *user);
@@ -44,6 +45,21 @@ int fz_plugins_list(char *buf, size_t cap);
 static inline int fz_luau_list(char *buf, size_t cap) { if (cap) *buf = 0; return 0; }
 static inline int fz_plugins_list(char *buf, size_t cap) { if (cap) *buf = 0; return 0; }
 #endif
+// A folder the fuse CLI deployed into: calls cb(id, path, sha256, user) for each file of its .fuse-deploy.json whose
+// path ends with ext, in the manifest's (resolved load) order, after checking the id and path stay inside the folder.
+// The number of files, or -1 when the folder has no manifest.
+typedef void (*fz_deployed_fn)(const char *id, const char *path, const char *sha256, void *user);
+int fz_deployed_files(const char *dir, const char *ext, fz_deployed_fn cb, void *user);
+// The packages' option values in the same manifest: cb(id, "key=t:value") for each (t: b, n or s), in order. -1 when
+// there is no manifest.
+typedef void (*fz_config_fn)(const char *id, const char *entry, void *user);
+int fz_deployed_config(const char *dir, fz_config_fn cb, void *user);
+// 1 when the SHA-256 of [data, data+n) is the lower-case hex digest want.
+int fz_file_sha256_hex(const void *data, size_t n, const char *want);
+// ExeFS patches (fuse_patches.c): the deployed .fzpatch files of TOTK_FUSE_SCRIPTS, written into the modules they name
+// by build id. The loader calls it once, after loading the images and before relocating them.
+typedef struct { const char *name; uint64_t base, text_end, data_end; char bid[65]; } FzPatchModule;   // offsets from base
+void fz_patches_apply(const FzPatchModule *mods, int n);
 // The guest address of a named function from TOTK_FUSE_SYMBOLS (main base + its offset); 0 when unknown.
 uint64_t fz_sym(const char *name);
 

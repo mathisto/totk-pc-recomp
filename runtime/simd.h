@@ -44,8 +44,8 @@ typedef u128 __attribute__((aligned(1), may_alias)) u128u;
 #define VSF32(n) (*(saf32 *)&c->v[n])
 #define VSF64(n) (*(saf64 *)&c->v[n])
 #define VHI64(n) (((sa64 *)&c->v[n])[1])
-#define LD128(a) (*(const u128u *)(uintptr_t)(a))
-#define ST128(a, v) (*(u128u *)(uintptr_t)(a) = (u128)(v))
+#define LD128(a) (*(const u128u *)(uintptr_t)GA(a))
+#define ST128(a, v) (*(u128u *)(uintptr_t)GA(a) = (u128)(v))
 #define SHUF __builtin_shufflevector
 #define CVT __builtin_convertvector
 

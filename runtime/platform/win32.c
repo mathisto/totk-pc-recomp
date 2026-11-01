@@ -495,13 +495,146 @@ int plat_file_list(const char *dir, const char *ext, int (*cb)(const char *name,
 
 // ---- virtual memory: VirtualAlloc reservations, MEM_WRITE_WATCH for the watched ones.
 
+// ---- the sealed launch: the guest window filled before the game's own process starts
+// A process's first heaps, thread stacks and loader data land wherever the address space is free when its loader
+// runs, which on Windows is often below 2^39, inside the guest window, where nothing of the host may live (memory.c).
+// So the first run of totk.exe is a launcher: it starts the game suspended, checks the one block the kernel made
+// before anything can run (PEB, TEB, main stack: placed at random, below 2^39 about half the time, so it starts again
+// until it is not), fills every other free range below 2^39 with placeholder reservations, and lets the game run. The
+// game's mem_init then carves its regions out of the placeholders (plat_mem_reserve) and everything of the host lands
+// above 2^39. Placeholders (Windows 10 1803+) can be split and replaced in place, which plain reservations cannot.
+// TOTK_SEAL_LOW=0 in the environment skips the launcher.
+#ifndef MEM_RESERVE_PLACEHOLDER
+#define MEM_RESERVE_PLACEHOLDER 0x00040000
+#endif
+#ifndef MEM_REPLACE_PLACEHOLDER
+#define MEM_REPLACE_PLACEHOLDER 0x00004000
+#endif
+#ifndef MEM_PRESERVE_PLACEHOLDER
+#define MEM_PRESERVE_PLACEHOLDER 0x00000002
+#endif
+typedef PVOID(WINAPI *VirtualAlloc2Fn)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, void *, ULONG);
+
+static VirtualAlloc2Fn virtual_alloc2(void) {
+    static VirtualAlloc2Fn fn;
+    static int looked;
+    if (!looked) {
+        HMODULE k = GetModuleHandleA("kernelbase.dll");
+        fn = k ? (VirtualAlloc2Fn)(void *)GetProcAddress(k, "VirtualAlloc2") : NULL;
+        looked = 1;
+    }
+    return fn;
+}
+
+#define SEAL_LIMIT (1ull << 39)
+static int is_shared_page(uint64_t a) { return a >= 0x7ffe0000ull && a < 0x7fff0000ull; }   // KUSER_SHARED_DATA's
+
+// Anything below 2^39 in the suspended child besides the shared pages: the kernel's block landed in the window.
+static int child_low_clean(HANDLE proc) {
+    uint64_t a = 0x10000;
+    while (a < SEAL_LIMIT) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQueryEx(proc, (void *)(uintptr_t)a, &m, sizeof m) || !m.RegionSize) return 0;
+        uint64_t base = (uint64_t)(uintptr_t)m.BaseAddress;
+        if (m.State != MEM_FREE && !is_shared_page(base)) return 0;
+        a = base + m.RegionSize;
+    }
+    return 1;
+}
+
+static int child_seal(HANDLE proc, VirtualAlloc2Fn va2) {   // every free range below 2^39, as placeholders
+    int n = 0;
+    uint64_t a = 0x10000;
+    while (a < SEAL_LIMIT) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQueryEx(proc, (void *)(uintptr_t)a, &m, sizeof m) || !m.RegionSize) break;
+        uint64_t base = (uint64_t)(uintptr_t)m.BaseAddress, end = base + m.RegionSize;
+        if (end > SEAL_LIMIT) end = SEAL_LIMIT;
+        if (m.State == MEM_FREE) {
+            uint64_t lo = (base + 0xFFFF) & ~0xFFFFull, hi = end & ~0xFFFFull;
+            if (hi > lo && va2(proc, (void *)(uintptr_t)lo, hi - lo, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                               NULL, 0))
+                n++;
+        }
+        a = end;
+    }
+    return n;
+}
+
+static int launched_sealed;   // this process is the game a sealed launch started
+
+int plat_sealed_launch(void) { return launched_sealed; }
+
+void plat_launch_sealed(void) {
+    char flag[8];
+    if (GetEnvironmentVariableA("TOTK_SEALED", flag, sizeof flag)) {   // this is the game process
+        launched_sealed = 1;
+        SetEnvironmentVariableA("TOTK_SEALED", NULL);   // a game this one starts (a launcher of its own) seals again
+        return;
+    }
+    if (GetEnvironmentVariableA("TOTK_SEAL_LOW", flag, sizeof flag) && !strcmp(flag, "0")) return;
+    VirtualAlloc2Fn va2 = virtual_alloc2();
+    if (!va2) return;   // before Windows 10 1803: mem_init seals what it can
+    SetEnvironmentVariableA("TOTK_SEALED", "1");
+    wchar_t *cmd = _wcsdup(GetCommandLineW()), exe[MAX_PATH];
+    // The game process belongs to a job that ends with this launcher: whoever stops the process it started (a script,
+    // a launcher, the task manager) stops the game too.
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim = {.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+    if (job) SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof lim);
+    DWORD exe_n = GetModuleFileNameW(NULL, exe, MAX_PATH);   // the program itself, not whatever argv[0] says
+    PROCESS_INFORMATION pi;
+    int tries = 0;
+    for (;;) {
+        STARTUPINFOW si = {.cb = sizeof si};
+        if (!cmd || !exe_n || exe_n >= MAX_PATH ||
+            !CreateProcessW(exe, cmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
+            SetEnvironmentVariableA("TOTK_SEALED", NULL);   // run unsealed in this process instead
+            if (job) CloseHandle(job);
+            return;
+        }
+        if (child_low_clean(pi.hProcess) || ++tries >= 32) break;
+        TerminateProcess(pi.hProcess, 0);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    child_seal(pi.hProcess, va2);
+    if (job) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 70;
+    GetExitCodeProcess(pi.hProcess, &code);
+    ExitProcess(code);
+}
+
 int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
     void *p = VirtualAlloc((void *)(uintptr_t)addr, n, MEM_RESERVE | (watch ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS);
     if (p && p != (void *)(uintptr_t)addr) {
         VirtualFree(p, 0, MEM_RELEASE);
         p = NULL;
     }
-    return p != NULL;
+    if (p) return 1;
+    // A sealed launch: the range lies inside a placeholder. Split it out, then turn that piece into the reservation.
+    VirtualAlloc2Fn va2 = virtual_alloc2();
+    MEMORY_BASIC_INFORMATION m;
+    if (!plat_sealed_launch() || !va2 || !VirtualQuery((void *)(uintptr_t)addr, &m, sizeof m) || m.State != MEM_RESERVE ||
+        m.Type != MEM_PRIVATE || m.AllocationProtect != PAGE_NOACCESS ||
+        addr + n > (uint64_t)(uintptr_t)m.BaseAddress + m.RegionSize)
+        return 0;
+    if ((uint64_t)(uintptr_t)m.BaseAddress != addr || m.RegionSize != n)
+        if (!VirtualFree((void *)(uintptr_t)addr, n, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) return 0;
+    if (va2(GetCurrentProcess(), (void *)(uintptr_t)addr, n,
+            MEM_RESERVE | MEM_REPLACE_PLACEHOLDER | (watch ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS, NULL, 0))
+        return 1;
+    // Some flags do not combine with replacing a placeholder (write watch): free the piece (split out above, so its
+    // allocation is exactly [addr, addr + n)) and reserve it plainly.
+    if (!VirtualQuery((void *)(uintptr_t)addr, &m, sizeof m) || (uint64_t)(uintptr_t)m.AllocationBase != addr ||
+        m.RegionSize != n || !VirtualFree((void *)(uintptr_t)addr, 0, MEM_RELEASE))
+        return 0;
+    p = VirtualAlloc((void *)(uintptr_t)addr, n, MEM_RESERVE | (watch ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS);
+    return p == (void *)(uintptr_t)addr;
 }
 
 void *plat_mem_alloc(size_t n) { return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
@@ -517,6 +650,58 @@ int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
     DWORD old;
     DWORD p = prot == PLAT_PROT_RW ? PAGE_READWRITE : prot == PLAT_PROT_READ ? PAGE_READONLY : PAGE_NOACCESS;
     return VirtualProtect((void *)(uintptr_t)addr, n, p, &old) != 0;
+}
+
+uint64_t plat_mem_seal_below(uint64_t limit, void (*in_use)(uint64_t base, uint64_t size, void *user), void *user) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    uint64_t g = si.dwAllocationGranularity, sealed = 0;
+    uint64_t a = (uint64_t)(uintptr_t)si.lpMinimumApplicationAddress;
+    while (a < limit) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery((void *)(uintptr_t)a, &m, sizeof m) || !m.RegionSize) break;
+        uint64_t base = (uint64_t)(uintptr_t)m.BaseAddress, end = base + m.RegionSize;
+        if (end > limit) end = limit;
+        if (m.State == MEM_FREE) {
+            uint64_t lo = (base + g - 1) & ~(g - 1), hi = end & ~(g - 1);   // reservations start on 64 KiB boundaries
+            if (hi > lo && VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_NOACCESS)) sealed += hi - lo;
+        } else if (m.State == MEM_RESERVE && m.AllocationProtect == PAGE_NOACCESS) {
+            // Reserved inaccessible with nothing committed: the launcher's placeholders, an earlier seal, or a guest
+            // region before its pages are committed. No host data can be there.
+        } else if (in_use) {
+            in_use(base, end - base, user);
+        }
+        a = end;
+    }
+    return sealed;
+}
+
+void *plat_code_alloc_near(const void *close_to, size_t n) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    uint64_t g = si.dwAllocationGranularity, c = (uint64_t)(uintptr_t)close_to & ~(g - 1);
+    for (uint64_t d = g; d < (1ull << 30); d += g)   // within 1 GB either side, so all of a large image stays in reach
+        for (int below = 1; below >= 0; below--) {
+            uint64_t a = below ? c - d : c + d;
+            void *p = VirtualAlloc((void *)(uintptr_t)a, n, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READ);
+            if (p) return p;
+        }
+    return NULL;
+}
+
+int plat_code_write(void *dst, const void *src, size_t n) {
+    DWORD old;
+    if (!VirtualProtect(dst, n, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    if (n == 2) {   // one store, so a thread fetching these bytes sees the old or the new pair, never a mix
+        uint16_t v;
+        memcpy(&v, src, 2);
+        __asm__ volatile("movw %w1, (%0)" : : "r"(dst), "r"(v) : "memory");
+    } else {
+        memcpy(dst, src, n);
+    }
+    VirtualProtect(dst, n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), dst, n);
+    return 1;
 }
 
 int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {

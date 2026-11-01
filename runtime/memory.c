@@ -208,6 +208,30 @@ static void reexec_or_fail(const char *what) {
     plat_reexec();
 }
 
+// ---- the guest window: everything below 2^39 is the guest's or nobody's
+// Lifted code's memory accesses are masked below 2^39 (cpu.h GA), which confines steered game code only if no host
+// memory lives there. So once the guest's regions are reserved, every other free range below 2^39 is reserved
+// inaccessible (later host allocations, thread stacks and DLLs go above), with a guard just above 2^39 for the up to
+// 15 bytes a 16-byte access at 2^39 - 1 reaches. What the host had there before this point is logged; it cannot move.
+// TOTK_SEAL_LOW=0 turns the sealing off (a diagnosis aid, not a setting to ship).
+typedef struct { uint64_t mods_lo, mods_hi, low, alias, host_bytes; int host_regions; } SealCtx;
+
+static int in_guest_region(const SealCtx *s, uint64_t a) {
+    return (a >= s->mods_lo && a < s->mods_hi) || a - RT_KERNEL_BASE < RT_KERNEL_SIZE || a - RT_HOSTFN_BASE < RT_HOSTFN_SIZE ||
+           a - s->low < LOW_SIZE || a - s->alias < ALIAS_SIZE;
+}
+
+static void seal_in_use(uint64_t base, uint64_t size, void *user) {
+    SealCtx *s = user;
+    if (in_guest_region(s, base)) return;
+    if (s->host_regions++ < 8)
+        rt_log("memory: host memory below 2^39 at %#llx+%#llx (made before the guest window was sealed)",
+               (unsigned long long)base, (unsigned long long)size);
+    s->host_bytes += size;
+}
+
+static void seal_guest_window(void);
+
 void mem_init(void) {
     if (L.pool) return;
     // Fixed window: modules, kernel region, host-function addresses.
@@ -245,6 +269,7 @@ void mem_init(void) {
         .pool = pool ? strtoull(pool, NULL, 0) : DEFAULT_POOL + res_heap_extra_bytes(),   // resolution.c
     };
     if (!L.pool) rt_fatal("memory: TOTK_APP_POOL is 0");
+    seal_guest_window();
 }
 
 const RtGuestLayout *mem_layout(void) { return &L; }
@@ -523,11 +548,34 @@ int mem_guest_access(uint64_t a, uint64_t n, int write) {
         ok = 1;
         for (uint64_t off = (a - m->base) & ~(PAGE - 1); off < a + n - m->base && ok; off += PAGE)
             ok = (module_page_perm(mi, off) & need) == need;
-    } else if (inside(a, n, L.kernel) || inside(a, n, L.stack)) {
+    } else if (inside(a, n, L.stack)) {
+        ok = 1;
+    } else if (inside(a, n, L.kernel)) {
         ok = 1;
     }
     plat_mutex_unlock_shared(&lock);
     return ok;
+}
+
+// The kernel region is also the runtime's own allocator arena (thread-local regions, host-object structs, free-list
+// links), so untrusted callers may read it (guest TLS) but never write it.
+int mem_script_access(uint64_t a, uint64_t n, int write) {
+    if (write && n && a + n >= a && overlaps(a, n, L.kernel.base, L.kernel.size)) return 0;
+    return mem_guest_access(a, n, write);
+}
+
+static void seal_guest_window(void) {
+    const char *off = cfg_get("TOTK_SEAL_LOW");
+    if (off && !strcmp(off, "0")) {
+        rt_log("memory: TOTK_SEAL_LOW=0: the guest window is not sealed; steered game code could reach host memory");
+        return;
+    }
+    SealCtx s = {mods_lo, mods_hi, L.aslr.base, L.alias.base, 0, 0};
+    uint64_t sealed = plat_mem_seal_below(RT_ADDRESS_LIMIT, seal_in_use, &s);
+    int guard = reserve_at(RT_ADDRESS_LIMIT, 0x10000, 0);
+    rt_log("memory: guest window sealed%s: %.1f GiB more reserved inaccessible below 2^39; host memory left there: %d "
+           "regions, %.1f MiB%s", plat_sealed_launch() ? " (sealed launch)" : "", sealed / (double)GiB, s.host_regions,
+           s.host_bytes / (1024.0 * 1024.0), guard ? "" : "; the guard above 2^39 is taken");
 }
 
 uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
@@ -657,6 +705,12 @@ void *mem_kernel_alloc(uint64_t size, uint64_t align) {
     KFree *f = kfree_list[k];
     void *p;
     if (f) {
+        // The block's first bytes are guest-visible memory game code could have written: the link must be another
+        // block of this class in the arena, or the list ends.
+        uint64_t next = (uint64_t)(uintptr_t)f->next;
+        if (next && (next - RT_KERNEL_BASE >= RT_KERNEL_SIZE || (next & (al - 1)) || next + bytes > kbump))
+            rt_fatal("memory: kernel arena free list corrupted (class %d link %#llx); guest code wrote a freed block", k,
+                     (unsigned long long)next);
         kfree_list[k] = f->next;
         p = f;
     } else {

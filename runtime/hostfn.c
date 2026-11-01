@@ -177,8 +177,8 @@ void hostfn_seal(void) {
     sealed = 1;
     int n = rt_linked_modules(mods, 16);
     rt_dispatch_init(mods, n);
+    devlink_init();   // first, so its log ring holds what the mods below log as they load
     fz_init();
-    devlink_init();
 }
 
 uint64_t hostfn_calls(void) {

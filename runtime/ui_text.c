@@ -345,6 +345,41 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_RELOAD_DESC] = "Loads the Luau scripts again from their folder without restarting the game: their hooks "
                                  "come off, the edited scripts load and attach theirs. Native plugins stay as they are.",
     [UI_MENU_MODS_RELOADED] = "Reloaded: %d script hooks",
+    [UI_MENU_MODS_COST] = "Cost per frame",
+    [UI_MENU_MODS_COL_MOD] = "Mod", [UI_MENU_MODS_COL_AVG] = "Average", [UI_MENU_MODS_COL_PEAK] = "Peak (2 s)",
+    [UI_MENU_MODS_COL_CALLS] = "Calls", [UI_MENU_MODS_COL_HOOKS] = "Hooks", [UI_MENU_MODS_COL_STATE] = "State",
+    [UI_MENU_MODS_FMT_MS] = "%.2f ms",
+    [UI_MENU_MODS_OK] = "OK", [UI_MENU_MODS_BUSY] = "Busy", [UI_MENU_MODS_PAUSED] = "Events paused",
+    [UI_MENU_MODS_BUDGET] = "Each mod may use %.1f ms per frame. A mod over that for about half a second has its event "
+                            "handlers paused for a while; its hooks keep running.",
+    [UI_MENU_MODS_TOGGLE_NOTE] = "Switching a script mod reloads the scripts at once; its ExeFS patches change at "
+                                 "the next start. Data and native mods are changed with the fuse manager and need a "
+                                 "restart.",
+    [UI_MENU_MODS_DROP_TITLE] = "Install a mod",
+    [UI_MENU_MODS_DROP_CHECKING] = "Checking %s",
+    [UI_MENU_MODS_DROP_BY] = "By %s",
+    [UI_MENU_MODS_DROP_USES] = "Asks for: %s",
+    [UI_MENU_MODS_DROP_KIND_DATA] = "Data mod: changes game files, runs no code.",
+    [UI_MENU_MODS_DROP_KIND_SCRIPT] = "Script mod: runs inside the game's sandbox, with no access to your files or the "
+                                      "internet.",
+    [UI_MENU_MODS_DROP_KIND_NATIVE] = "Native mod: runs with full access to your PC.",
+    [UI_MENU_MODS_DROP_INSTALL] = "Install",
+    [UI_MENU_MODS_DROP_CANCEL] = "Cancel",
+    [UI_MENU_MODS_DROP_NATIVE_OUTSIDE] = "Native mods are installed with the fuse manager, outside the game, where you "
+                                         "turn them on one by one.",
+    [UI_MENU_MODS_DROP_INSTALLING] = "Installing %s",
+    [UI_MENU_MODS_DROP_DONE_LIVE] = "Installed %s. It is running now.",
+    [UI_MENU_MODS_DROP_DONE_RESTART] = "Installed %s. Run fuse apply after closing the game, then start it again.",
+    [UI_MENU_MODS_DROP_FAILED] = "Not installed: %s",
+    [UI_MENU_MODS_DROP_NO_MANAGER] = "Mods can be dropped here once the fuse manager has set up this game (fuse apply "
+                                     "--game).",
+    [UI_MENU_MODS_DROP_NOT_PACKAGE] = "Drop a mod package (.zip or .fusepkg).",
+    [UI_MENU_MODS_DROP_HINT] = "To install a mod, drop its package on the game window.",
+    [UI_MENU_MODS_DROP_CLOSE] = "Close",
+    [UI_MENU_MODS_DROP_UNVERIFIED] = "From a file on this PC: the author is what the package says, not verified.",
+    [UI_MENU_MODS_DROP_REPLACES] = "Replaces the installed version %s.",
+    [UI_MENU_MODS_DROP_REMOTE_OUTSIDE] = "The installed version came from a mod index or download; replace it with the "
+                                         "fuse manager, outside the game.",
 };
 
 static const char *const text_ru[UI_TEXT_COUNT] = {
@@ -671,6 +706,40 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_RELOAD_DESC] = "Заново загружает скрипты Luau из их папки без перезапуска игры: их перехваты снимаются, "
                                  "изменённые скрипты загружаются и ставят свои. Нативные плагины остаются как есть.",
     [UI_MENU_MODS_RELOADED] = "Перезагружено: перехватов скриптов %d",
+    [UI_MENU_MODS_COST] = "Затраты за кадр",
+    [UI_MENU_MODS_COL_MOD] = "Мод", [UI_MENU_MODS_COL_AVG] = "Среднее", [UI_MENU_MODS_COL_PEAK] = "Пик (2 с)",
+    [UI_MENU_MODS_COL_CALLS] = "Вызовы", [UI_MENU_MODS_COL_HOOKS] = "Перехваты", [UI_MENU_MODS_COL_STATE] = "Состояние",
+    [UI_MENU_MODS_FMT_MS] = "%.2f мс",
+    [UI_MENU_MODS_OK] = "OK", [UI_MENU_MODS_BUSY] = "Нагружен", [UI_MENU_MODS_PAUSED] = "События на паузе",
+    [UI_MENU_MODS_BUDGET] = "Каждому моду доступно %.1f мс за кадр. Если мод превышает это около полусекунды, его "
+                            "обработчики событий ненадолго приостанавливаются; перехваты продолжают работать.",
+    [UI_MENU_MODS_TOGGLE_NOTE] = "Переключение мода-скрипта сразу перезагружает скрипты; его патчи ExeFS "
+                                 "меняются при следующем запуске. Моды данных и нативные моды "
+                                 "меняются через менеджер fuse и требуют перезапуска.",
+    [UI_MENU_MODS_DROP_TITLE] = "Установка мода",
+    [UI_MENU_MODS_DROP_CHECKING] = "Проверка %s",
+    [UI_MENU_MODS_DROP_BY] = "Автор: %s",
+    [UI_MENU_MODS_DROP_USES] = "Запрашивает: %s",
+    [UI_MENU_MODS_DROP_KIND_DATA] = "Мод данных: меняет файлы игры, не запускает код.",
+    [UI_MENU_MODS_DROP_KIND_SCRIPT] = "Мод-скрипт: работает в песочнице игры, без доступа к вашим файлам и интернету.",
+    [UI_MENU_MODS_DROP_KIND_NATIVE] = "Нативный мод: работает с полным доступом к вашему ПК.",
+    [UI_MENU_MODS_DROP_INSTALL] = "Установить",
+    [UI_MENU_MODS_DROP_CANCEL] = "Отмена",
+    [UI_MENU_MODS_DROP_NATIVE_OUTSIDE] = "Нативные моды устанавливаются менеджером fuse вне игры, где их включают по "
+                                         "одному.",
+    [UI_MENU_MODS_DROP_INSTALLING] = "Установка %s",
+    [UI_MENU_MODS_DROP_DONE_LIVE] = "%s установлен и уже работает.",
+    [UI_MENU_MODS_DROP_DONE_RESTART] = "%s установлен. Закройте игру, выполните fuse apply и запустите её снова.",
+    [UI_MENU_MODS_DROP_FAILED] = "Не установлен: %s",
+    [UI_MENU_MODS_DROP_NO_MANAGER] = "Моды можно перетаскивать сюда, когда менеджер fuse настроит эту игру (fuse apply "
+                                     "--game).",
+    [UI_MENU_MODS_DROP_NOT_PACKAGE] = "Перетащите пакет мода (.zip или .fusepkg).",
+    [UI_MENU_MODS_DROP_HINT] = "Чтобы установить мод, перетащите его пакет на окно игры.",
+    [UI_MENU_MODS_DROP_CLOSE] = "Закрыть",
+    [UI_MENU_MODS_DROP_UNVERIFIED] = "Из файла на этом ПК: автор указан самим пакетом и не проверен.",
+    [UI_MENU_MODS_DROP_REPLACES] = "Заменяет установленную версию %s.",
+    [UI_MENU_MODS_DROP_REMOTE_OUTSIDE] = "Установленная версия получена из каталога модов или загрузки; замените её "
+                                         "менеджером fuse вне игры.",
 };
 
 #define SWKBD_ONLY(name, ...) static const char *const name[UI_TEXT_COUNT] = {SWKBD(__VA_ARGS__)}

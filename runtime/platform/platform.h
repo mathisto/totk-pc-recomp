@@ -188,6 +188,17 @@ void *plat_mem_alloc(size_t n);
 int plat_mem_commit(uint64_t addr, size_t n);             // read-write pages inside a reserved range; 1 on success
 int plat_mem_decommit(uint64_t addr, uint64_t n);          // contents dropped: committed again, the pages read zero
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot); // committed pages only; 1 on success
+// Host code: n bytes of read-execute memory within 2 GB of close_to (for rel32 jumps), NULL when none is free; and
+// writing n bytes over host code (the pages made writable for the write, the instruction cache flushed after).
+void *plat_code_alloc_near(const void *close_to, size_t n);
+// Reserves every free range below limit inaccessible, so no later host allocation can land there, and calls in_use for
+// each range already taken (by the guest's reservations or by the host). Returns the bytes sealed.
+uint64_t plat_mem_seal_below(uint64_t limit, void (*in_use)(uint64_t base, uint64_t size, void *user), void *user);
+// Windows: the first run of the program relaunches it with the guest window sealed before its loader runs, waits and
+// exits with the game's exit code; returns at once in the game process (and when sealing is off or unavailable).
+void plat_launch_sealed(void);
+int plat_sealed_launch(void);   // this process is a game started by a sealed launch
+int plat_code_write(void *dst, const void *src, size_t n);
 // The page at addr: PLAT_PROT_* when committed, else PLAT_MEM_RESERVED or PLAT_MEM_FREE (not reserved by us). *end
 // gets the end of the run of pages in the same state, at most limit.
 int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end);

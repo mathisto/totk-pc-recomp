@@ -372,6 +372,7 @@ void rt_boot(void) {
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
     PlatThread *warm = plat_thread_new(prewarm_main, NULL, "prewarm");
+    ldr_enable_fuse_patches();
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     frame_step_init();

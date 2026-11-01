@@ -722,7 +722,193 @@ static void tab_menu(float scale) {
     opt_end();
 }
 
-// ---- Mods (Fuse): the scripts and native plugins that loaded, the hooks attached, and reloading the scripts
+// ---- Mods (Fuse): the scripts and native plugins that loaded, their cost, the hooks attached, reloading the scripts
+#include "fuse_stats.h"
+#include <cctype>
+#include <mutex>
+#include <thread>
+
+// A mod package dropped on the window (menu_drop_file, on the window's thread): the manager describes it (`fuse card`)
+// and, if the player agrees, installs it (`fuse install`, then `fuse apply --again --no-merge` to deploy it). Both run
+// on a worker thread; the card shows the state. A native mod is never installed from here.
+enum { DROP_NONE, DROP_CHECKING, DROP_READY, DROP_INSTALLING, DROP_DONE, DROP_FAILED };
+static struct {
+    std::mutex mx;
+    int state;
+    char path[1024], file[128];
+    char id[72], version[32], name[96], tier[16], authors[160], caps[200], summary[200];
+    char sha256[72], replaces[240];   // what card checked (install takes exactly those bytes); what it would replace
+    int replaces_remote;              // the installed package came from an index or URL: only the manager replaces it
+    char message[300];   // DROP_DONE / DROP_FAILED: the outcome, already formatted
+} g_drop;
+static std::atomic<int> g_drop_show{0};   // a drop happened: the frame opens the menu on the Mods tab
+
+static void card_field(const char *text, const char *key, char *out, size_t cap) {   // "key=value" lines of fuse card
+    size_t kl = strlen(key);
+    for (const char *l = text; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : nullptr) {
+        if (!strncmp(l, key, kl) && l[kl] == '=') {
+            const char *v = l + kl + 1, *e = v;
+            while (*e && *e != '\n' && *e != '\r') e++;
+            snprintf(out, cap, "%.*s", (int)(e - v), v);
+            return;
+        }
+    }
+    if (cap) *out = 0;
+}
+
+static void drop_fail(const char *why) {
+    snprintf(g_drop.message, sizeof g_drop.message, menu_text(UI_MENU_MODS_DROP_FAILED), why);
+    g_drop.state = DROP_FAILED;
+}
+
+static void drop_check(void) {   // worker thread
+    char path[sizeof g_drop.path], out[8192];
+    {
+        std::lock_guard<std::mutex> l(g_drop.mx);
+        snprintf(path, sizeof path, "%s", g_drop.path);
+    }
+    const char *args[] = {"card", "--", path};
+    int rc = fz_manager_run(args, 3, out, sizeof out, 0);
+    std::lock_guard<std::mutex> l(g_drop.mx);
+    char ok[4], err[200];
+    card_field(out, "ok", ok, sizeof ok);
+    if (rc != 0 || strcmp(ok, "1")) {
+        card_field(out, "error", err, sizeof err);
+        drop_fail(*err ? err : (rc < 0 ? "the fuse manager did not run" : "not a valid mod package"));
+        return;
+    }
+    card_field(out, "id", g_drop.id, sizeof g_drop.id);
+    card_field(out, "version", g_drop.version, sizeof g_drop.version);
+    card_field(out, "name", g_drop.name, sizeof g_drop.name);
+    card_field(out, "tier", g_drop.tier, sizeof g_drop.tier);
+    card_field(out, "authors", g_drop.authors, sizeof g_drop.authors);
+    card_field(out, "capabilities", g_drop.caps, sizeof g_drop.caps);
+    card_field(out, "summary", g_drop.summary, sizeof g_drop.summary);
+    card_field(out, "sha256", g_drop.sha256, sizeof g_drop.sha256);
+    card_field(out, "replaces", g_drop.replaces, sizeof g_drop.replaces);
+    char remote[4];
+    card_field(out, "replaces_remote", remote, sizeof remote);
+    g_drop.replaces_remote = !strcmp(remote, "1");
+    if (strlen(g_drop.sha256) != 64) {
+        drop_fail("the fuse manager did not report the package's hash");
+        return;
+    }
+    g_drop.state = DROP_READY;
+}
+
+static void drop_install(void) {   // worker thread
+    char path[sizeof g_drop.path], tier[16], name[96], sha[72], out[8192];
+    {
+        std::lock_guard<std::mutex> l(g_drop.mx);
+        snprintf(path, sizeof path, "%s", g_drop.path);
+        snprintf(tier, sizeof tier, "%s", g_drop.tier);
+        snprintf(name, sizeof name, "%s", g_drop.name);
+        snprintf(sha, sizeof sha, "%s", g_drop.sha256);
+    }
+    // --sha256: exactly the bytes the card showed; a file that changed since is refused.
+    const char *install[] = {"install", "--sha256", sha, "--", path};
+    int rc = fz_manager_run(install, 5, out, sizeof out, 1);
+    if (rc == 0) {
+        const char *apply[] = {"apply", "--again", "--no-merge"};
+        rc = fz_manager_run(apply, 3, out, sizeof out, 1);
+    }
+    bool live = !strcmp(tier, "script");
+    if (rc == 0 && live && fz_luau_reload() < 0) live = false;   // installed; it runs after the next reload
+    std::lock_guard<std::mutex> l(g_drop.mx);
+    if (rc != 0) {
+        const char *last = out, *p = out;   // the manager's last line says why
+        for (; *p; p++)
+            if (*p == '\n' && p[1]) last = p + 1;
+        char why[200];
+        snprintf(why, sizeof why, "%.*s", (int)strcspn(last, "\r\n"), last);
+        drop_fail(*why ? why : "the fuse manager failed");
+        return;
+    }
+    snprintf(g_drop.message, sizeof g_drop.message,
+             menu_text(live ? UI_MENU_MODS_DROP_DONE_LIVE : UI_MENU_MODS_DROP_DONE_RESTART), name);
+    g_drop.state = DROP_DONE;
+}
+
+extern "C" void menu_drop_file(const char *path_utf8) {
+    size_t n = strlen(path_utf8);
+    std::lock_guard<std::mutex> l(g_drop.mx);
+    if (g_drop.state == DROP_CHECKING || g_drop.state == DROP_INSTALLING) return;   // one at a time
+    const char *base = strrchr(path_utf8, '\\');
+    snprintf(g_drop.file, sizeof g_drop.file, "%s", base ? base + 1 : path_utf8);
+    g_drop_show.store(1);
+    auto ends = [&](const char *ext) {   // case-insensitive
+        size_t k = strlen(ext);
+        if (n <= k) return false;
+        for (size_t i = 0; i < k; i++)
+            if (tolower((unsigned char)path_utf8[n - k + i]) != ext[i]) return false;
+        return true;
+    };
+    bool pkg = ends(".zip") || ends(".fusepkg");
+    if (!pkg || n >= sizeof g_drop.path || strchr(path_utf8, '"')) {
+        snprintf(g_drop.message, sizeof g_drop.message, "%s", menu_text(UI_MENU_MODS_DROP_NOT_PACKAGE));
+        g_drop.state = DROP_FAILED;
+        return;
+    }
+    if (!fz_manager_ready()) {
+        snprintf(g_drop.message, sizeof g_drop.message, "%s", menu_text(UI_MENU_MODS_DROP_NO_MANAGER));
+        g_drop.state = DROP_FAILED;
+        return;
+    }
+    snprintf(g_drop.path, sizeof g_drop.path, "%s", path_utf8);
+    g_drop.state = DROP_CHECKING;
+    std::thread(drop_check).detach();
+}
+
+// The card at the top of the Mods tab, while there is one.
+static void drop_card(void) {
+    std::unique_lock<std::mutex> l(g_drop.mx);
+    if (g_drop.state == DROP_NONE) return;
+    ImGui::SeparatorText(menu_text(UI_MENU_MODS_DROP_TITLE));
+    const ImVec4 warn_c(0.95f, 0.45f, 0.35f, 1);
+    switch (g_drop.state) {
+    case DROP_CHECKING:
+        ImGui::Text(menu_text(UI_MENU_MODS_DROP_CHECKING), g_drop.file);
+        break;
+    case DROP_INSTALLING:
+        ImGui::Text(menu_text(UI_MENU_MODS_DROP_INSTALLING), g_drop.name);
+        break;
+    case DROP_READY: {
+        bool native = !strcmp(g_drop.tier, "native");
+        ImGui::Text("%s  %s", g_drop.name, g_drop.version);
+        ImGui::TextDisabled("%s", g_drop.id);
+        if (*g_drop.summary) ImGui::TextWrapped("%s", g_drop.summary);
+        ImGui::Text(menu_text(UI_MENU_MODS_DROP_BY), g_drop.authors);
+        ImGui::TextDisabled("%s", menu_text(UI_MENU_MODS_DROP_UNVERIFIED));   // a local file: the author is self-declared
+        if (strcmp(g_drop.replaces, "-")) ImGui::TextWrapped(menu_text(UI_MENU_MODS_DROP_REPLACES), g_drop.replaces);
+        UiTextId kind = native ? UI_MENU_MODS_DROP_KIND_NATIVE : !strcmp(g_drop.tier, "data") ? UI_MENU_MODS_DROP_KIND_DATA
+                                                                                              : UI_MENU_MODS_DROP_KIND_SCRIPT;
+        if (native) ImGui::PushStyleColor(ImGuiCol_Text, warn_c);
+        ImGui::TextWrapped("%s", menu_text(kind));
+        if (native) ImGui::PopStyleColor();
+        if (strcmp(g_drop.caps, "-")) ImGui::TextWrapped(menu_text(UI_MENU_MODS_DROP_USES), g_drop.caps);
+        if (native || g_drop.replaces_remote) {
+            ImGui::TextWrapped("%s", menu_text(native ? UI_MENU_MODS_DROP_NATIVE_OUTSIDE : UI_MENU_MODS_DROP_REMOTE_OUTSIDE));
+            if (ImGui::Button(menu_text(UI_MENU_MODS_DROP_CLOSE))) g_drop.state = DROP_NONE;
+        } else {
+            if (ImGui::Button(menu_text(UI_MENU_MODS_DROP_INSTALL))) {
+                g_drop.state = DROP_INSTALLING;
+                std::thread(drop_install).detach();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(menu_text(UI_MENU_MODS_DROP_CANCEL))) g_drop.state = DROP_NONE;
+        }
+        break;
+    }
+    case DROP_DONE:
+    case DROP_FAILED:
+        if (g_drop.state == DROP_FAILED) ImGui::PushStyleColor(ImGuiCol_Text, warn_c);
+        ImGui::TextWrapped("%s", g_drop.message);
+        if (g_drop.state == DROP_FAILED) ImGui::PopStyleColor();
+        if (ImGui::Button(menu_text(UI_MENU_MODS_DROP_CLOSE))) g_drop.state = DROP_NONE;
+        break;
+    }
+    ImGui::Spacing();
+}
 extern "C" {
 int fz_hook_count(void);
 int fz_luau_list(char *buf, size_t cap);
@@ -735,8 +921,24 @@ static void tab_mods(float scale) {
     char scripts[4096], plugins[2048];
     int ns = fz_luau_list(scripts, sizeof scripts), np = fz_plugins_list(plugins, sizeof plugins);
     opt_begin("##mods", scale);
-    if (!ns && !np) ImGui::TextWrapped("%s", menu_text(UI_MENU_MODS_NONE));
-    if (ns) {
+    drop_card();
+    if (!ns && !np && !fz_luau_packages(nullptr, 0)) ImGui::TextWrapped("%s", menu_text(UI_MENU_MODS_NONE));
+    // Deployed script mods get a switch each (on or off in game, kept in <scripts>/.fuse-disabled); loose scripts, an
+    // author's working folder, are listed by file.
+    FzPackage pk[64];
+    int npk = fz_luau_packages(pk, 64);
+    if (npk) {
+        ImGui::SeparatorText(menu_text(UI_MENU_MODS_SCRIPTS));
+        for (int i = 0; i < npk; i++) {
+            bool on = pk[i].enabled != 0;
+            ImGui::PushID(i);
+            if (ImGui::Checkbox(pk[i].id, &on)) fz_luau_set_enabled(pk[i].id, on);
+            ImGui::PopID();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", menu_text(UI_MENU_MODS_TOGGLE_NOTE));
+        ImGui::PopStyleColor();
+    } else if (ns) {
         ImGui::SeparatorText(menu_text(UI_MENU_MODS_SCRIPTS));
         ImGui::TextUnformatted(scripts);
     }
@@ -744,7 +946,51 @@ static void tab_mods(float scale) {
         ImGui::SeparatorText(menu_text(UI_MENU_MODS_PLUGINS));
         ImGui::TextUnformatted(plugins);
     }
+    // Each script mod's cost: its own time in its hooks and handlers (not the game code they call), most expensive
+    // first. The state is spelled out, the colour only repeats it.
+    FzModStat st[32];
+    float budget = 0;
+    int nm = fz_luau_stats(st, 32, &budget);
+    if (nm) {
+        ImGui::SeparatorText(menu_text(UI_MENU_MODS_COST));
+        if (ImGui::BeginTable("##modcost", 6, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+            static const UiTextId cols[] = {UI_MENU_MODS_COL_MOD, UI_MENU_MODS_COL_AVG, UI_MENU_MODS_COL_PEAK,
+                                            UI_MENU_MODS_COL_CALLS, UI_MENU_MODS_COL_HOOKS, UI_MENU_MODS_COL_STATE};
+            for (int c = 0; c < 6; c++)
+                ImGui::TableSetupColumn(menu_text(cols[c]), c ? ImGuiTableColumnFlags_WidthFixed : ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+            const ImVec4 busy_c(0.93f, 0.76f, 0.33f, 1), paused_c(0.95f, 0.45f, 0.35f, 1);
+            for (int i = 0; i < nm; i++) {
+                char b[32];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(st[i].id);
+                ImGui::SetItemTooltip("%s", st[i].id);   // a long id is clipped by its column
+                ImGui::TableNextColumn();
+                snprintf(b, sizeof b, menu_text(UI_MENU_MODS_FMT_MS), st[i].avg_ms);
+                ImGui::TextUnformatted(b);
+                ImGui::TableNextColumn();
+                snprintf(b, sizeof b, menu_text(UI_MENU_MODS_FMT_MS), st[i].max_ms);
+                ImGui::TextUnformatted(b);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", st[i].calls);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", st[i].hooks);
+                ImGui::TableNextColumn();
+                if (st[i].status == FZ_MOD_THROTTLED) ImGui::TextColored(paused_c, "%s", menu_text(UI_MENU_MODS_PAUSED));
+                else if (st[i].status == FZ_MOD_BUSY) ImGui::TextColored(busy_c, "%s", menu_text(UI_MENU_MODS_BUSY));
+                else ImGui::TextDisabled("%s", menu_text(UI_MENU_MODS_OK));
+            }
+            ImGui::EndTable();
+        }
+        char note[512];
+        snprintf(note, sizeof note, menu_text(UI_MENU_MODS_BUDGET), budget);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", note);
+        ImGui::PopStyleColor();
+    }
     ImGui::Spacing();
+    if (fz_manager_ready()) ImGui::TextDisabled("%s", menu_text(UI_MENU_MODS_DROP_HINT));
     ImGui::Text(menu_text(UI_MENU_MODS_HOOKS), fz_hook_count());
     if (opt_button("##fuse_reload", UI_MENU_MODS_RELOAD, UI_MENU_MODS_RELOAD_DESC)) reloaded = fz_luau_reload();
     if (reloaded >= 0) ImGui::Text(menu_text(UI_MENU_MODS_RELOADED), reloaded);
@@ -1276,6 +1522,11 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     if (g_perf_save.exchange(0)) cfg_save();
     perf_tick(plat_now_ns(), t);
     bool open = g_open.load(std::memory_order_relaxed);
+    if (g_drop_show.exchange(0)) {   // a mod package was dropped on the window: show its card
+        g_tab_request = TAB_MODS;
+        if (!open) set_open(1);
+        open = true;
+    }
     if (!open) {
         if (g_save_pending) g_save_pending = opt_save_tick(1);   // closed: the last change goes to totk.ini now
         if (g_test.at && !g_test.opened && frame >= g_test.at) {

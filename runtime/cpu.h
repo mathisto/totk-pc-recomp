@@ -64,6 +64,15 @@ static inline void rt_fpcr_sync(const Cpu *c) {
 #endif
 
 // ---- memory: guest addresses are host addresses
+// GA: the address a lifted (game) memory access uses. In generated code (built with FZ_GUEST_CODE) it is masked to the
+// guest's 39-bit address space, where every guest region lives (host.h RT_ADDRESS_LIMIT) and above which the host's
+// executable, DLLs and heaps live: game code, however it is steered (a Fuse script setting registers or writing guest
+// memory the game then follows), cannot reach host memory above that line. Runtime code keeps raw addresses.
+#ifdef FZ_GUEST_CODE
+#define GA(a) ((uint64_t)(a) & 0x7FFFFFFFFFull)
+#else
+#define GA(a) ((uint64_t)(a))
+#endif
 typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;
 typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
@@ -75,28 +84,39 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 // instruction against a table of a bit per function (about 31 KB for main), small enough to stay in cache. fz_enter
 // runs the hooks around the body and returns 1 when it ran the function in its place. (g_fnprof kept its name from
 // the function-entry profiler stub this replaced.)
+//
+// FZ_PATCH builds (tools/build_game.py with FZ_PATCH=1) have no gate at all: generated code is compiled with
+// -fpatchable-function-entry=7,5, so each lifted function starts with five spare bytes before its entry and a two-byte
+// no-op at it, and fuse_hooks.c hooks a function by patching its entry to jump to a stub (zero cost for every function
+// without a hook). FN_ATTR keeps lifted functions out of line there: an inlined copy would bypass the patched entry.
 extern volatile int g_fnprof;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 int fz_enter(struct Cpu *c, uint64_t addr);
+#ifdef FZ_PATCH
+#define FN_ATTR __attribute__((noinline))
+#define FN_ENTER(a, k) ((void)0)
+#else
+#define FN_ATTR
 #define FN_ENTER(a, k)                                                                                   \
     do {                                                                                                 \
         if (__builtin_expect(g_fnprof, 0) && (FZ_BITS[(k) >> 3] & (1u << ((k) & 7))) && fz_enter(c, (a))) \
             return;                                                                                      \
     } while (0)
+#endif
 
-#define LD8(a)  (*(const u8a *)(uintptr_t)(a))
-#define LD16(a) (*(const u16u *)(uintptr_t)(a))
-#define LD32(a) (*(const u32u *)(uintptr_t)(a))
-#define LD64(a) (*(const u64u *)(uintptr_t)(a))
-#define ST8(a, v)  (*(u8a *)(uintptr_t)(a) = (uint8_t)(v))
-#define ST16(a, v) (*(u16u *)(uintptr_t)(a) = (uint16_t)(v))
-#define ST32(a, v) (*(u32u *)(uintptr_t)(a) = (uint32_t)(v))
-#define ST64(a, v) (*(u64u *)(uintptr_t)(a) = (uint64_t)(v))
+#define LD8(a)  (*(const u8a *)(uintptr_t)GA(a))
+#define LD16(a) (*(const u16u *)(uintptr_t)GA(a))
+#define LD32(a) (*(const u32u *)(uintptr_t)GA(a))
+#define LD64(a) (*(const u64u *)(uintptr_t)GA(a))
+#define ST8(a, v)  (*(u8a *)(uintptr_t)GA(a) = (uint8_t)(v))
+#define ST16(a, v) (*(u16u *)(uintptr_t)GA(a) = (uint16_t)(v))
+#define ST32(a, v) (*(u32u *)(uintptr_t)GA(a) = (uint32_t)(v))
+#define ST64(a, v) (*(u64u *)(uintptr_t)GA(a) = (uint64_t)(v))
 
 // ---- exclusive monitor (emulated with compare-and-swap)
 #define EXCL(N, T)                                                                         \
     static inline uint64_t ldx##N(Cpu *c, uint64_t a) {                                    \
-        T v = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                        \
+        T v = __atomic_load_n((T *)(uintptr_t)GA(a), __ATOMIC_ACQUIRE);                        \
         c->excl_addr = a;                                                                  \
         c->excl_val = v;                                                                   \
         return v;                                                                          \
@@ -105,14 +125,14 @@ int fz_enter(struct Cpu *c, uint64_t addr);
         if (c->excl_addr != a) return 1;                                                   \
         c->excl_addr = ~0ull;                                                              \
         T expected = (T)c->excl_val;                                                       \
-        return !__atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,         \
+        return !__atomic_compare_exchange_n((T *)(uintptr_t)GA(a), &expected, (T)v, 0,         \
                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);           \
     }                                                                                      \
     static inline uint64_t lda##N(uint64_t a) {                                            \
-        return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
+        return __atomic_load_n((T *)(uintptr_t)GA(a), __ATOMIC_ACQUIRE);                       \
     }                                                                                      \
     static inline void stl##N(uint64_t a, uint64_t v) {                                    \
-        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_RELEASE);                       \
+        __atomic_store_n((T *)(uintptr_t)GA(a), (T)v, __ATOMIC_RELEASE);                       \
     }
 EXCL(8, uint8_t)
 EXCL(16, uint16_t)
@@ -122,7 +142,7 @@ EXCL(64, uint64_t)
 // Exclusive pair of two X registers: one 16-byte-aligned 128-bit access (cmpxchg16b; x86-64-v3 has CX16).
 // A pair of two W registers is a 64-bit exclusive and uses ldx64/stx64.
 static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
-    __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
+    __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)GA(a), __ATOMIC_ACQUIRE);
     c->excl_addr = a;
     c->excl_val = (uint64_t)v;
     c->excl_val_hi = (uint64_t)(v >> 64);
@@ -133,7 +153,7 @@ static inline uint32_t stxp128(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
     c->excl_addr = ~0ull;
     __uint128_t expected = ((__uint128_t)c->excl_val_hi << 64) | c->excl_val;
     __uint128_t v = ((__uint128_t)hi << 64) | lo;
-    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
+    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)GA(a), &expected, v, 0, __ATOMIC_SEQ_CST,
                                         __ATOMIC_SEQ_CST);
 }
 
@@ -141,26 +161,26 @@ static inline uint32_t stxp128(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
 // Add, clear, xor, set and swap map to __atomic builtins in the lifter; min/max need a CAS loop. Return the old value.
 #define ATOMIC_MINMAX(N, T, S)                                                             \
     static inline T atomic_smax##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, (S)o > (S)v ? o : v, 1, \
+        T o = __atomic_load_n((T *)(uintptr_t)GA(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)GA(a), &o, (S)o > (S)v ? o : v, 1, \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }                                                                                      \
     static inline T atomic_smin##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, (S)o < (S)v ? o : v, 1, \
+        T o = __atomic_load_n((T *)(uintptr_t)GA(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)GA(a), &o, (S)o < (S)v ? o : v, 1, \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }                                                                                      \
     static inline T atomic_umax##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, o > v ? o : v, 1,       \
+        T o = __atomic_load_n((T *)(uintptr_t)GA(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)GA(a), &o, o > v ? o : v, 1,       \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }                                                                                      \
     static inline T atomic_umin##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, o < v ? o : v, 1,       \
+        T o = __atomic_load_n((T *)(uintptr_t)GA(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)GA(a), &o, o < v ? o : v, 1,       \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }
