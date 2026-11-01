@@ -511,11 +511,82 @@ static int blocked(volatile int32_t *flag, uint64_t buttons) {
     return k && !(k == 2 && !buttons && plat_cas32(flag, 0, 2) == 2);
 }
 
+// The moments guard (ZL) last went down in what the game read, newest first, and the last moment A did, for the deflect
+// (game_hooks.c): monotonic ns. The ring is read without a lock: a reader racing a press may see one stale entry.
+#define GUARD_PRESSES 8
+static uint64_t guard_press[GUARD_PRESSES], a_press_ns;
+static unsigned guard_n;
+static int guard_held, a_held;
+
+static void guard_track(uint64_t buttons) {
+    int held = (int)(buttons >> 8 & 1);
+    if (held && !__atomic_load_n(&guard_held, __ATOMIC_RELAXED)) {
+        unsigned n = __atomic_load_n(&guard_n, __ATOMIC_RELAXED);
+        __atomic_store_n(&guard_press[n % GUARD_PRESSES], plat_now_ns(), __ATOMIC_RELAXED);
+        __atomic_store_n(&guard_n, n + 1, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&guard_held, held, __ATOMIC_RELAXED);
+}
+
+int input_guard_presses(uint64_t *t, int max, int *held) {
+    unsigned n = __atomic_load_n(&guard_n, __ATOMIC_ACQUIRE);
+    int k = 0;
+    for (; k < max && k < GUARD_PRESSES && (unsigned)k < n; k++)
+        t[k] = __atomic_load_n(&guard_press[(n - 1 - k) % GUARD_PRESSES], __ATOMIC_RELAXED);
+    *held = __atomic_load_n(&guard_held, __ATOMIC_RELAXED);
+    return k;
+}
+
+static void a_track(uint64_t buttons) {
+    int held = (int)(buttons & 1);
+    if (held && !__atomic_load_n(&a_held, __ATOMIC_RELAXED)) __atomic_store_n(&a_press_ns, plat_now_ns(), __ATOMIC_RELAXED);
+    __atomic_store_n(&a_held, held, __ATOMIC_RELAXED);
+}
+
+uint64_t input_a_press(void) { return __atomic_load_n(&a_press_ns, __ATOMIC_RELAXED); }
+
+// The toggle lock-on (game_hooks.c, TOTK_LOCKON = 1, read at start): the game's right-stick click (RCLICK, rebindable)
+// becomes the lock-on button and the game no longer sees it (it was the first-person view). Counted here: its presses,
+// and right-stick flicks (out past 75 % from inside 35 %), which switch targets while locked.
+static unsigned lock_presses, lock_flicks;
+static int lock_held, lock_out;
+
+static int lockon_enabled(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *s = cfg_get("TOTK_LOCKON");
+        on = s && *s && strcmp(s, "0");
+    }
+    return on;
+}
+
+static void lockon_track(uint64_t *buttons, int32_t rx, int32_t ry) {
+    if (!lockon_enabled()) return;
+    int held = (int)(*buttons >> 5 & 1);
+    if (held && !lock_held) __atomic_fetch_add(&lock_presses, 1, __ATOMIC_RELAXED);
+    lock_held = held;
+    *buttons &= ~(1ull << 5);
+    double m = sqrt((double)rx * rx + (double)ry * ry) / 32767.0;
+    if (m > 0.75 && !lock_out) {
+        lock_out = 1;
+        __atomic_fetch_add(&lock_flicks, 1, __ATOMIC_RELAXED);
+    } else if (m < 0.35) {
+        lock_out = 0;
+    }
+}
+
+void input_lockon_counts(unsigned *presses, unsigned *flicks) {
+    *presses = __atomic_load_n(&lock_presses, __ATOMIC_RELAXED);
+    *flicks = __atomic_load_n(&lock_flicks, __ATOMIC_RELAXED);
+}
+
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     poll_merged(buttons, lx, ly, rx, ry);
     int text = blocked(&g_block, *buttons), menu = blocked(&g_menu, *buttons);
-    if (!text && !menu) return;
-    *buttons = 0; *lx = *ly = *rx = *ry = 0;
+    if (text || menu) { *buttons = 0; *lx = *ly = *rx = *ry = 0; }
+    lockon_track(buttons, *rx, *ry);
+    guard_track(*buttons);
+    a_track(*buttons);
 }
 
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {

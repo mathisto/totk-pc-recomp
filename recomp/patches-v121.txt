@@ -988,3 +988,16 @@ hook tsq     main 1d53d98 aa0003f3 tsq_stamina_arm     # mov x19, x0 in ExecuteP
 hook tsq     main 1d54774 1e210800 tsq_stamina_arm     # fmul s0, s0, s1 in ExecutePlayerChargeLSwordSpin
 hook tsq     main 1d85a64 aa0003f4 tsq_stamina_arm     # mov x20, x0 in ExecutePlayerSpecialAttack
 hook tsq     main 9f1cb0  bd007661 tsq_stamina_hold    # str s1, [x19, #0x74] in StaminaCalculator::calcRecovery
+
+# Timed deflect (runtime/game_hooks.c): ERR's deflect and perfect deflect tiers for a guard pressed just before a hit.
+# Off unless deflect = 1 in totk.ini (TOTK_DEFLECT). Read at start.
+set deflect  TOTK_DEFLECT        0
+hook deflect main 14df158 39002e80 deflect_flags     # strb w0, [x20, #0xb] after CalcGuardFlags in HitInfoBase::setHitInfo_
+hook deflect main 6515cc  a9be7bfd deflect_effects   # stp x29, x30, [sp, #-0x20]! at Player::calc entry
+hook deflect main a077e8  36000340 deflect_repel     # tbz w0, #0 after isAttackRepelled in calcGuardReaction
+hook deflect main a07800  a9454ff4 deflect_reaction  # ldp x20, x19, [sp, #0x50]: the epilogue of calcGuardReaction
+
+# Toggle lock-on (runtime/game_hooks.c): the lock-on request follows a toggle button (the game's RCLICK) instead of a
+# held ZL, so guard taps for the deflect keep the lock. Off unless lockon = 1 in totk.ini (TOTK_LOCKON). Read at start.
+set lockon   TOTK_LOCKON         0
+hook lockon  main 1d31020 37100f56 lockon_request    # tbnz w22, #2 (ZL held) in ExecutePlayerCalcKey::updateImpl_

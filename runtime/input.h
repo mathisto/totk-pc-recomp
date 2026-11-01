@@ -9,6 +9,13 @@ void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_
 // The same for host UI (the text entry): never blocked. input_block(1) while a text entry is open: input_poll then
 // reports nothing; input_block(0) when it closes: nothing until all buttons and stick directions are released.
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+// The moments guard (ZL) last went down in what input_poll reported (plat_now_ns), newest first: up to max (at most 8)
+// into t, returns how many; *held: whether it is held now. For the deflect (game_hooks.c).
+int input_guard_presses(uint64_t *t, int max, int *held);
+uint64_t input_a_press(void);   // when A last went down in what input_poll reported (0 = never)
+// With TOTK_LOCKON = 1: how many times the lock-on button (the game's RCLICK, which input_poll then hides) went down
+// and the right stick was flicked, since start. For the toggle lock-on (game_hooks.c).
+void input_lockon_counts(unsigned *presses, unsigned *flicks);
 void input_block(int on);
 // The in-game menu (ui/menu.h): input_menu(1) when it opens (input_poll reports nothing, the cursor is released), (0) when
 // it closes (nothing until every button and stick direction is released). Independent of input_block.
