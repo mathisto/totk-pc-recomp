@@ -2,10 +2,10 @@
 //
 // - One thread accepts loopback connections; the first request on a connection must be {"method":"auth","params":
 //   {"token":...}} with the token from <profile>/devlink.json ({host, port, token, pid, version}, rewritten each launch).
-// - Requests run on the DevLink thread. Guest memory reads and writes are checked with VirtualQuery first; the game
+// - Requests run on the DevLink thread. Memory reads and writes reach guest memory only (mem_guest_access); the game
 //   keeps running meanwhile, so a read is a snapshot. A screenshot waits for the next present.
 // - Methods: auth, ping, log, cfg_get, cfg_set, patch, read, write, name, hook, hooks, shot, input, lua, script_reload,
-//   quit.
+//   notify, quit.
 // The "write" and "hook" methods change the running game: DevLink is for development, keep it off otherwise.
 #define _CRT_RAND_S
 #include "devlink.h"
@@ -126,22 +126,9 @@ static uint64_t json_u64(const char *line, const char *key, uint64_t def) {
     return json_get(line, key, v, sizeof v) ? strtoull(v, NULL, 0) : def;
 }
 
-// ---- guest memory, checked
+// ---- guest memory, checked: the guest's own memory only (mem_guest_access), never the runtime's
 
-static int readable(uint64_t a, size_t n, int write) {
-    while (n) {
-        MEMORY_BASIC_INFORMATION mi;
-        if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi) || mi.State != MEM_COMMIT) return 0;
-        DWORD ok = write ? (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)
-                         : (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                            PAGE_EXECUTE_WRITECOPY);
-        if (!(mi.Protect & ok) || (mi.Protect & PAGE_GUARD)) return 0;
-        uint64_t end = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
-        size_t k = end - a < n ? (size_t)(end - a) : n;
-        a += k, n -= k;
-    }
-    return 1;
-}
+static int readable(uint64_t a, size_t n, int write) { return mem_guest_access(a, n, write); }
 
 // ---- built-in hooks for exploring: count calls, or also log the first arguments (rate-limited)
 
@@ -290,6 +277,13 @@ static int method(const char *line, const char *name, Buf *r) {
         int n = fz_luau_reload();
         if (n < 0) return -32007;
         putf(r, "{\"hooks\":%d}", n);
+    } else if (!strcmp(name, "notify")) {   // {text, seconds}: a message at the top of the game's screen
+        char text[256];
+        if (!json_get(line, "text", text, sizeof text)) return -32602;
+        char msg[300];
+        snprintf(msg, sizeof msg, "[Claude] %s", text);
+        menu_notice(msg, (double)json_u64(line, "seconds", 5));
+        put(r, "{\"ok\":true}", 11);
     } else if (!strcmp(name, "quit")) {
         gfx_window_request_close();
         put(r, "{\"ok\":true}", 11);

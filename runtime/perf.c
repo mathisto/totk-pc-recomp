@@ -261,6 +261,7 @@ void perf_present(uint64_t frame) {
     ab_b += rt_ab();
     cpu_placement();
     fz_present();
+    fz_luau_frame(frame);
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);

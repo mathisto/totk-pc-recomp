@@ -562,6 +562,14 @@ void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
 }
 
 static void (*crash_fn)(const PlatCrash *c);
+static struct { uintptr_t base, size; } watched[32];   // plat_crash_watch: more code whose crashes are ours
+static volatile LONG nwatched;
+
+void plat_crash_watch(const void *base, size_t size) {
+    LONG i = InterlockedIncrement(&nwatched) - 1;
+    if (i >= 32) return;
+    watched[i].base = (uintptr_t)base, watched[i].size = size;
+}
 
 static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -572,12 +580,15 @@ static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
                      : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
                      : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
     if (!what) return EXCEPTION_CONTINUE_SEARCH;
-    uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip;
+    uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip, base = 0;
     MODULEINFO mi;
-    if (!GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi) ||
-        rip - (uintptr_t)mi.lpBaseOfDll >= mi.SizeOfImage)
-        return EXCEPTION_CONTINUE_SEARCH;   // not our code: leave it to the handler that expects it
-    PlatCrash c = {what, (uint32_t)code, rip, rip - (uintptr_t)mi.lpBaseOfDll, -1, 0};
+    if (GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi) &&
+        rip - (uintptr_t)mi.lpBaseOfDll < mi.SizeOfImage)
+        base = (uintptr_t)mi.lpBaseOfDll;
+    for (LONG i = 0; !base && i < nwatched && i < 32; i++)
+        if (rip - watched[i].base < watched[i].size) base = watched[i].base;
+    if (!base) return EXCEPTION_CONTINUE_SEARCH;   // not our code: leave it to the handler that expects it
+    PlatCrash c = {what, (uint32_t)code, rip, rip - base, -1, 0};
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
         c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
     crash_fn(&c);

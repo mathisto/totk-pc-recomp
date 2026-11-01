@@ -1,6 +1,7 @@
 // Fuse runtime hooks (spike). See fuse_hooks.h.
 #include "fuse_hooks.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,6 +9,9 @@
 #include "dispatch.h"
 #include "host.h"
 #include "platform/platform.h"
+#if __has_include("layout.h")
+#include "layout.h"
+#endif
 
 #define FZ_BUCKETS 4096   // hook chains by function, power of two
 #define FZ_DEPTH 8        // nested hooked calls on one thread before functions run unhooked
@@ -29,6 +33,9 @@ static int nhooks, gate_mode = 1;
 // The function fz_enter is running the original body of: its FN_ENTER lets that one call through.
 static __thread uint64_t bypass;
 static __thread int depth;
+// For the crash report (fz_crash_note): the innermost hooked function on this thread, and the callback running.
+static __thread uint64_t running_addr;
+static __thread const void *running_cb;
 
 static unsigned bucket_of(uint64_t addr) { return (unsigned)((addr >> 2) * 0x9E3779B1u) & (FZ_BUCKETS - 1); }
 
@@ -97,11 +104,14 @@ int fz_enter(Cpu *c, uint64_t addr) {
     FzHook *h = depth < FZ_DEPTH ? first_hook(addr) : NULL;
     if (!h) return 0;
     depth++;
+    uint64_t outer_addr = running_addr;
+    running_addr = addr;
     int skip = 0;
-    for (FzHook *k = h; k && k->addr == addr; k = k->next)
-        if (!k->dead && k->before && k->before(c, k->user)) {
-            skip = 1;
-            break;
+    for (FzHook *k = h; k && k->addr == addr && !skip; k = k->next)
+        if (!k->dead && k->before) {
+            running_cb = (const void *)k->before;
+            skip = k->before(c, k->user);
+            running_cb = NULL;
         }
     if (!skip) {
         GuestFn f = rt_dispatch_lookup(addr);
@@ -110,9 +120,83 @@ int fz_enter(Cpu *c, uint64_t addr) {
         bypass = 0;   // in case the gate went off before the body's FN_ENTER read it
     }
     for (FzHook *k = h; k && k->addr == addr; k = k->next)
-        if (!k->dead && k->after) k->after(c, k->user);
+        if (!k->dead && k->after) {
+            running_cb = (const void *)k->after;
+            k->after(c, k->user);
+            running_cb = NULL;
+        }
+    running_addr = outer_addr;
     depth--;
     return 1;
+}
+
+// ---- symbols (TOTK_FUSE_SYMBOLS): a file of `name = 0xOFFSET` lines (offsets in main; '#' starts a comment, a
+// [section] line is skipped), so mods hook by name; the Fuse SDK ships one per game version.
+
+typedef struct { char *name; uint64_t offset; } FzSym;
+static FzSym *syms;
+static size_t nsyms;
+
+static int sym_order(const void *a, const void *b) { return strcmp(((const FzSym *)a)->name, ((const FzSym *)b)->name); }
+
+static void load_symbols(void) {
+    const char *path = cfg_get("TOTK_FUSE_SYMBOLS");
+    if (!path || !*path) return;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        rt_log("fuse: cannot open TOTK_FUSE_SYMBOLS %s", path);
+        return;
+    }
+    char line[512];
+    size_t cap = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *h = strchr(line, '#');
+        if (h) *h = 0;
+        char name[400];
+        unsigned long long off;
+        // name = 0x..., the name optionally quoted (TOML keys with :: need quotes)
+        if (sscanf(line, " \"%399[^\"]\" = %llx", name, &off) != 2 && sscanf(line, " %399[^= 	] = %llx", name, &off) != 2)
+            continue;
+        if (nsyms == cap) {
+            cap = cap ? cap * 2 : 64;
+            FzSym *n = realloc(syms, cap * sizeof *syms);
+            if (!n) break;
+            syms = n;
+        }
+        syms[nsyms++] = (FzSym){strdup(name), off};
+    }
+    fclose(f);
+    qsort(syms, nsyms, sizeof *syms, sym_order);
+    rt_log("fuse: %zu symbols from %s", nsyms, path);
+}
+
+uint64_t fz_sym(const char *name) {
+    size_t lo = 0, hi = nsyms;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        int c = strcmp(syms[mid].name, name);
+        if (!c) {
+#if __has_include("layout.h")
+            return MOD_MAIN_BASE + syms[mid].offset;
+#else
+            return 0;
+#endif
+        }
+        if (c < 0) lo = mid + 1; else hi = mid;
+    }
+    return 0;
+}
+
+int fz_hook_count(void) { return __atomic_load_n(&nhooks, __ATOMIC_RELAXED); }
+
+void fz_crash_note(void) {
+    if (!running_addr) return;
+    char at[64], who[160];
+    rt_guest_name(running_addr, at, sizeof at);
+    if (running_cb)
+        rt_logf("  Fuse: in a hook callback at %s on %s\n", fz_owner_name(running_cb, who, sizeof who), at);
+    else
+        rt_logf("  Fuse: inside the original body of the hooked function %s\n", at);
 }
 
 void fz_present(void) {
@@ -123,7 +207,6 @@ void fz_present(void) {
 // ---- the spike's test hooks (TOTK_FUSE_TEST): 1.2.1 addresses, so only in a build against a game layout
 
 #if __has_include("layout.h")
-#include "layout.h"
 #define MAIN(off) (MOD_MAIN_BASE + (off))
 
 static uint64_t calc_calls;
@@ -158,9 +241,11 @@ static void attach(const char *name, uint64_t addr, fz_before_fn b, fz_after_fn 
 #endif
 
 void fz_init(void) {
+    load_symbols();
     const char *g = cfg_get("TOTK_FUSE_GATE");
     gate_mode = !g || !*g ? 1 : !strcmp(g, "ab") ? 2 : strcmp(g, "0") != 0;
     fz_luau_init();
+    fz_plugins_init();
     const char *t = cfg_get("TOTK_FUSE_TEST");
     int test = t && *t ? atoi(t) : 0;
     if (!test) return;

@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "devlink.h"
+#include "fuse_hooks.h"
 #include "cfg.h"
 #include "host.h"
 #include "platform/platform.h"
@@ -226,6 +227,7 @@ static void crash_handler(const PlatCrash *x) {
     rt_log_raw("\n", 1);
     uint64_t f = lifted_function(rip);
     if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
+    fz_crash_note();
     for (int i = 0; i < x->nframes; i++) {   // abort and invalid parameter: where the host code called it
         uint64_t g = lifted_function(x->frames[i]);
         rt_logf("  host frame %2d: totk+%#llx", i, (unsigned long long)(x->frames[i] - (rip - x->offset)));

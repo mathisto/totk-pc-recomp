@@ -38,7 +38,7 @@ typedef struct { uint64_t offset, size; uint32_t name, len; } Entry;
 _Static_assert(sizeof(Entry) == 24, "index entry layout");
 
 typedef struct { uint32_t volume, pad; uint64_t file_id, size, write_time, create_time; } Identity;   // no padding
-typedef struct { uint64_t index, size; char *path, *name; Identity id; } Overlay;
+typedef struct { uint64_t index, size; char *path, *name; Identity id; unsigned layer; } Overlay;   // layer: load order
 
 static uint8_t *index_bytes;
 static size_t index_size;
@@ -205,7 +205,7 @@ static uint32_t overlay_slot(uint64_t i) {
 // Loads and checks one overlay folder. A failed check stops the game, except with optional set (the Xbox prompts
 // folder): the folder is dropped, the reason logged, and 0 returned. Returns 1 when the folder is loaded or has no
 // manifest.
-static int overlay_load(const char *dir, int optional) {
+static int overlay_load(const char *dir, int optional, unsigned layer) {
 #define BAD(...) do { if (!optional) rt_fatal(__VA_ARGS__); rt_log(__VA_ARGS__); goto bad; } while (0)
     char path[2100];
     need(snprintf(path, sizeof path, "%s/manifest.tsv", dir) < (int)sizeof path, "overlay path");
@@ -262,7 +262,7 @@ static int overlay_load(const char *dir, int optional) {
         }
         char *copy = strdup(file), *rel = strdup(name);
         need(copy && rel, "overlay path copy");
-        overlays[noverlay++] = (Overlay){i, size, copy, rel, id};
+        overlays[noverlay++] = (Overlay){i, size, copy, rel, id, layer};
         if (noverlay - first <= 16)
             rt_log("RomFS overlay: %s (%llu bytes) %s", name, size, add ? "is added" : "replaces the original");
     }
@@ -283,16 +283,40 @@ bad:
 #undef BAD
 }
 
-static int overlay_order(const void *a, const void *b) {
-    uint64_t x = ((const Overlay *)a)->index, y = ((const Overlay *)b)->index;
-    return (x > y) - (x < y);
+static int overlay_order(const void *a, const void *b) {   // by RomFS index, then layer
+    const Overlay *p = a, *q = b;
+    if (p->index != q->index) return (p->index > q->index) - (p->index < q->index);
+    return (p->layer > q->layer) - (p->layer < q->layer);
 }
 
-static int added_order(const void *a, const void *b) {
-    return strcmp((*(Overlay *const *)a)->name, (*(Overlay *const *)b)->name);
+static int added_order(const void *a, const void *b) {   // by path, then layer
+    const Overlay *p = *(Overlay *const *)a, *q = *(Overlay *const *)b;
+    int c = strcmp(p->name, q->name);
+    return c ? c : (p->layer > q->layer) - (p->layer < q->layer);
 }
 
-// Number the added files in path order after the RomFS's own (file_count + k); two overlays adding one path stop.
+// Of the overlay files that replace or add the same path, the one from the latest layer stays; the others go, each
+// logged (the first 16 by name). Then overlays is sorted by RomFS index again.
+#define SHADOWED (UINT64_MAX - 1)   // below ADDED
+static void drop_shadowed(void) {
+    size_t shadowed = 0;
+    for (size_t k = 1; k < noverlay; k++)
+        if (overlays[k].index != SHADOWED && overlays[k].index != ADDED && overlays[k].index == overlays[k - 1].index) {
+            if (++shadowed <= 16)
+                rt_log("RomFS overlay: %s replaces %s's copy of %s", overlays[k].path, overlays[k - 1].path,
+                       overlays[k].name);
+            overlays[k - 1].index = SHADOWED;
+        }
+    size_t n = 0;
+    for (size_t k = 0; k < noverlay; k++)
+        if (overlays[k].index != SHADOWED) overlays[n++] = overlays[k];
+        else free(overlays[k].path), free(overlays[k].name);
+    noverlay = n;
+    if (shadowed) rt_log("RomFS overlay: %zu files from earlier layers replaced by later ones", shadowed);
+}
+
+// Number the added files in path order after the RomFS's own (file_count + k); of two overlays adding one path, the
+// later layer's stays.
 static void added_init(void) {
     Overlay **list = NULL;
     for (size_t k = 0; k < noverlay; k++)
@@ -305,12 +329,17 @@ static void added_init(void) {
     qsort(list, nadded, sizeof *list, added_order);
     added = malloc(nadded * sizeof *added);
     need(added != NULL, "added files");
+    size_t n = 0;
     for (size_t k = 0; k < nadded; k++) {
-        if (k && !strcmp(list[k]->name, list[k - 1]->name))
-            rt_fatal("RomFS overlay: %s and %s both add %s", list[k - 1]->path, list[k]->path, list[k]->name);
-        list[k]->index = file_count + k;
-        added[k] = list[k]->name;
+        if (k + 1 < nadded && !strcmp(list[k]->name, list[k + 1]->name)) {   // a later layer adds it too
+            rt_log("RomFS overlay: %s replaces %s's added %s", list[k + 1]->path, list[k]->path, list[k]->name);
+            list[k]->index = SHADOWED;
+            continue;
+        }
+        list[k]->index = file_count + n;
+        added[n++] = list[k]->name;
     }
+    nadded = n;
     free(list);
     rt_log("RomFS overlay: %zu files added to the RomFS", nadded);
 }
@@ -367,7 +396,7 @@ static void heapdef_overlay(void) {
         }
         char *rel = strdup(HEAPDEF);
         need(rel != NULL, "overlay path copy");
-        overlays[noverlay++] = (Overlay){i, out_n, copy, rel, id};
+        overlays[noverlay++] = (Overlay){i, out_n, copy, rel, id, ~0u};   // above every layer
     }
     rt_log("RomFS overlay: %s (%zu bytes, grown heaps) replaces %s", file, out_n, base ? "the mod's table" : "the original");
     res_heapdef_served();
@@ -409,7 +438,7 @@ static void overlay_init(void) {
     int want_xbox = !strcasecmp(cfg_value("TOTK_PAD_LAYOUT"), "xbox_prompts");
     if (!patches && want_xbox && xbox_prompts_ready) {
         xbox[strlen(xbox) - strlen("/manifest.tsv")] = 0;
-        xbox_prompts_active = overlay_load(xbox, 1);
+        xbox_prompts_active = overlay_load(xbox, 1, 1000);
         if (xbox_prompts_active) rt_log("RomFS overlay: Xbox button prompts (%s)", xbox);
         else rt_log("RomFS overlay: %s failed its check (run the setup again); romfs-patches loads instead", xbox);
     } else if (want_xbox) {
@@ -423,16 +452,25 @@ static void overlay_init(void) {
         def[strlen(def) - strlen("/manifest.tsv")] = 0;
         patches = def;
     }
-    const char *dirs[2] = {patches, cfg_get("TOTK_ROMFS_MODS")};
-    for (int i = 0; i < 2; i++)
-        if (dirs[i] && *dirs[i] && strcmp(dirs[i], "0")) overlay_load(dirs[i], 0);
+    // TOTK_ROMFS_MODS: overlay folders separated by ';', in load order: a later folder's file replaces an earlier one's
+    // (logged). The port's own patches load above every mod layer, so a mod never drops the port's fixes; a mod that
+    // must change a file the port patches is merged first (Fuse / tools/mods.py re-apply the port's patches on top).
+    const char *mods = cfg_get("TOTK_ROMFS_MODS");
+    unsigned layer = 0;
+    if (mods && *mods && strcmp(mods, "0")) {
+        char *list = strdup(mods), *save = NULL;
+        need(list != NULL, "TOTK_ROMFS_MODS copy");
+        for (char *d = strtok_r(list, ";", &save); d; d = strtok_r(NULL, ";", &save))
+            if (*d) overlay_load(d, 0, ++layer);
+        free(list);
+    }
+    if (patches && *patches && strcmp(patches, "0")) overlay_load(patches, 0, 1000);
     heapdef_overlay();
-    added_init();
     if (noverlay) qsort(overlays, noverlay, sizeof *overlays, overlay_order);
-    for (size_t k = 1; k < noverlay; k++)
-        if (overlays[k].index == overlays[k - 1].index)
-            rt_fatal("RomFS overlay: %s and %s replace the same file %s", overlays[k - 1].path, overlays[k].path,
-                     overlays[k].name);
+    drop_shadowed();
+    added_init();
+    if (noverlay) qsort(overlays, noverlay, sizeof *overlays, overlay_order);   // the added files have their indices now
+    drop_shadowed();   // added files a later layer replaced are marked; this drops them
 }
 
 // ---- start

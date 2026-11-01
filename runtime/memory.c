@@ -507,6 +507,29 @@ static uint64_t run_start(const uint8_t *p, uint64_t i, uint8_t v) {   // first 
     return i;
 }
 
+int mem_guest_access(uint64_t a, uint64_t n, int write) {
+    if (!n || a + n < a) return 0;
+    unsigned need = write ? PERM_RW & ~PERM_R : PERM_R;
+    int ok = 0, mi;
+    plat_mutex_lock_shared(&lock);
+    if (inside(a, n, (RtRange){L.heap.base, heap_size})) {
+        ok = 1;
+    } else if (inside(a, n, L.alias)) {
+        uint64_t first = (a - L.alias.base) / PAGE, last = (a + n - 1 - L.alias.base) / PAGE;
+        ok = 1;
+        for (uint64_t p = first; p <= last && ok; p++) ok = alias_pages[p] != 0;
+    } else if ((mi = module_index(a)) >= 0 && module_index(a + n - 1) == mi) {
+        const RtLoaded *m = ldr_module(mi);
+        ok = 1;
+        for (uint64_t off = (a - m->base) & ~(PAGE - 1); off < a + n - m->base && ok; off += PAGE)
+            ok = (module_page_perm(mi, off) & need) == need;
+    } else if (inside(a, n, L.kernel) || inside(a, n, L.stack)) {
+        ok = 1;
+    }
+    plat_mutex_unlock_shared(&lock);
+    return ok;
+}
+
 uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
     RtMemoryInfo r = {.base = a & ~(PAGE - 1), .size = PAGE};
     uint64_t low = L.aslr.base;

@@ -30,16 +30,36 @@ int fz_hook(uint64_t addr, fz_before_fn before, fz_after_fn after, void *user, i
 // Removes every hook attached with this user pointer; the number removed. The function's map byte stays set, so a
 // later call still takes the hook path once and finds nothing (cheap); the gate turns off when no hook is left.
 int fz_unhook(void *user);
+// The crash reporter's line about Fuse: whether the crashing thread was inside a hook callback (and whose: the module
+// and offset of the callback, which names a native plugin's DLL) or inside a hooked function's body.
+void fz_crash_note(void);
+// The module (DLL or exe) and offset of a host code address, for crash reports (fuse_plugins_win.c).
+const char *fz_owner_name(const void *fn, char *buf, size_t cap);
+// For the Mods tab: hooks attached now; the loaded scripts and plugins, one name per line (the count is returned).
+int fz_hook_count(void);
+#ifdef _WIN32
+int fz_luau_list(char *buf, size_t cap);
+int fz_plugins_list(char *buf, size_t cap);
+#else
+static inline int fz_luau_list(char *buf, size_t cap) { if (cap) *buf = 0; return 0; }
+static inline int fz_plugins_list(char *buf, size_t cap) { if (cap) *buf = 0; return 0; }
+#endif
+// The guest address of a named function from TOTK_FUSE_SYMBOLS (main base + its offset); 0 when unknown.
+uint64_t fz_sym(const char *name);
 
 // Luau scripts (fuse_luau_win.cpp, Windows only for now): TOTK_FUSE_SCRIPTS=<folder of *.luau>, loaded at start; reload
 // (unhook all script hooks, fresh VM, load again; the number of hooks) and eval (a chunk in the live VM: 0 and its
 // printed lines and results in out, else the error).
 #ifdef _WIN32
+void fz_plugins_init(void);   // fuse_plugins_win.c: native plugins (TOTK_FUSE_PLUGINS, only with TOTK_FUSE_NATIVE=1)
 void fz_luau_init(void);
+void fz_luau_frame(uint64_t frame);   // every present: the scripts' "frame" handlers
 int fz_luau_reload(void);
 int fz_luau_eval(const char *code, char *out, size_t cap);
 #else
+static inline void fz_plugins_init(void) {}
 static inline void fz_luau_init(void) {}
+static inline void fz_luau_frame(uint64_t frame) { (void)frame; }
 static inline int fz_luau_reload(void) { return -1; }
 static inline int fz_luau_eval(const char *code, char *out, size_t cap) { (void)code, (void)out, (void)cap; return -1; }
 #endif

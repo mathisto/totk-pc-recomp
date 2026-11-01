@@ -175,7 +175,11 @@ typedef enum {
     UI_MENU_OV_FMT_SCENE,     // "%ux%u, %.0f%%": the scene and its share of the game image's width
     UI_MENU_OV_FMT_FSR,       // "AMD FSR 1, sharpness %d%%"
     UI_MENU_OV_SCALE_NONE, UI_MENU_OV_SCALE_BILINEAR,
-    UI_MENU_LAST_ID = UI_MENU_OV_SCALE_BILINEAR,
+    // Mods tab (Fuse): what is loaded, and reloading scripts
+    UI_MENU_TAB_MODS, UI_MENU_MODS_NONE, UI_MENU_MODS_SCRIPTS, UI_MENU_MODS_PLUGINS,
+    UI_MENU_MODS_HOOKS,       // "%d hooks attached"
+    UI_MENU_MODS_RELOAD, UI_MENU_MODS_RELOAD_DESC, UI_MENU_MODS_RELOADED,   // the button; "%d hooks after the reload"
+    UI_MENU_LAST_ID = UI_MENU_MODS_RELOADED,
     UI_TEXT_COUNT
 } UiTextId;
 

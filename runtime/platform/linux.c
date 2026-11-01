@@ -1648,3 +1648,5 @@ long plat_child_read(PlatChild *c, void *buf, size_t cap) {
     while (k < 0 && errno == EINTR);
     return (long)k;
 }
+
+void plat_crash_watch(const void *base, size_t size) { (void)base, (void)size; }

@@ -11,6 +11,7 @@
 // 575ad88e02f9a89a9a885d90039d48af33c982f4, MIT, Copyright (c) 2026 Revivedx and the Savage Wind Recomp contributors,
 // Copyright (c) 2026 Peiikai); the pages are rows of option_rows.cpp.
 #include <atomic>
+#include <mutex>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -362,7 +363,7 @@ extern "C" void menu_vk_release(void) {
 // TOTK_MENU_TEST_SET=<frame>:<key>=<value>[,<key>=<value>...][;<frame>:...]: cfg_set of each key (TOTK_ prefix
 // optional) at that presented frame; changes live settings with no input, menu open or not. totk.ini is written only by
 // the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note).
-enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_MENU, TAB_ADVANCED, TAB_COUNT };
+enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_MENU, TAB_ADVANCED, TAB_MODS, TAB_COUNT };
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -721,6 +722,35 @@ static void tab_menu(float scale) {
     opt_end();
 }
 
+// ---- Mods (Fuse): the scripts and native plugins that loaded, the hooks attached, and reloading the scripts
+extern "C" {
+int fz_hook_count(void);
+int fz_luau_list(char *buf, size_t cap);
+int fz_plugins_list(char *buf, size_t cap);
+int fz_luau_reload(void);
+}
+
+static void tab_mods(float scale) {
+    static int reloaded = -1;   // hooks after the last reload from this tab, shown under the button
+    char scripts[4096], plugins[2048];
+    int ns = fz_luau_list(scripts, sizeof scripts), np = fz_plugins_list(plugins, sizeof plugins);
+    opt_begin("##mods", scale);
+    if (!ns && !np) ImGui::TextWrapped("%s", menu_text(UI_MENU_MODS_NONE));
+    if (ns) {
+        ImGui::SeparatorText(menu_text(UI_MENU_MODS_SCRIPTS));
+        ImGui::TextUnformatted(scripts);
+    }
+    if (np) {
+        ImGui::SeparatorText(menu_text(UI_MENU_MODS_PLUGINS));
+        ImGui::TextUnformatted(plugins);
+    }
+    ImGui::Spacing();
+    ImGui::Text(menu_text(UI_MENU_MODS_HOOKS), fz_hook_count());
+    if (opt_button("##fuse_reload", UI_MENU_MODS_RELOAD, UI_MENU_MODS_RELOAD_DESC)) reloaded = fz_luau_reload();
+    if (reloaded >= 0) ImGui::Text(menu_text(UI_MENU_MODS_RELOADED), reloaded);
+    opt_end();
+}
+
 // ---- Advanced: the testing and troubleshooting keys, the bug report helpers and the reset of every setting
 static bool g_modal;   // the reset confirmation is open: B and Esc close it, not the menu; L / R stay on the page
 
@@ -880,7 +910,8 @@ static void tab_advanced(float scale) {
 }
 
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND,
-                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU, UI_MENU_TAB_ADVANCED};
+                                              UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU, UI_MENU_TAB_ADVANCED,
+                                              UI_MENU_TAB_MODS};
 static int g_tab;               // the tab shown
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
@@ -933,6 +964,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
             case TAB_CONTROLS: tab_controls(scale); break;
             case TAB_MENU: tab_menu(scale); break;
             case TAB_ADVANCED: tab_advanced(scale); break;
+            case TAB_MODS: tab_mods(scale); break;
             }
             ImGui::EndTabItem();
         }
@@ -1193,6 +1225,37 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
     ImGui::End();
 }
 
+// ---- notices (menu_notice): one short message at the top of the screen, from DevLink or a script mod; any thread
+static std::mutex g_notice_lock;
+static char g_notice[256];
+static std::atomic<uint64_t> g_notice_until{0};
+
+extern "C" void menu_notice(const char *text, double seconds) {
+    {
+        std::lock_guard<std::mutex> l(g_notice_lock);
+        snprintf(g_notice, sizeof g_notice, "%s", text ? text : "");
+    }
+    if (seconds > 60) seconds = 60;
+    g_notice_until.store(plat_now_ns() + (uint64_t)((seconds > 0 ? seconds : 4) * 1e9), std::memory_order_relaxed);
+}
+
+static bool notice_active() { return plat_now_ns() < g_notice_until.load(std::memory_order_relaxed); }
+
+static void notice_draw(const MenuTarget *t, float scale) {
+    if (!notice_active()) return;
+    char text[256];
+    {
+        std::lock_guard<std::mutex> l(g_notice_lock);
+        memcpy(text, g_notice, sizeof text);
+    }
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    ImVec2 sz = ImGui::CalcTextSize(text);
+    float pad = 10 * scale;
+    ImVec2 p(((float)t->width - sz.x) / 2 - pad, 40 * scale);
+    dl->AddRectFilled(p, ImVec2(p.x + sz.x + 2 * pad, p.y + sz.y + 2 * pad), IM_COL32(0, 0, 0, 170), 6 * scale);
+    dl->AddText(ImVec2(p.x + pad, p.y + pad), IM_COL32(255, 255, 255, 240), text);
+}
+
 static void perf_draw(const MenuTarget *t, float scale) {
     if (g_perf_mode == 2) return perf_full_draw(t, scale);
     float w = (float)t->width;
@@ -1221,7 +1284,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
             g_tab_request = 0;
             set_open(1);
             open = true;
-        } else if (!g_perf_mode) {
+        } else if (!g_perf_mode && !notice_active()) {
             return 0;
         }
     }
@@ -1271,6 +1334,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     ImGui::NewFrame();
     if (open) layout_menu(t->width, t->height, scale);
     perf_draw(t, scale);
+    notice_draw(t, scale);
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
     g_cost_ns += plat_now_ns() - t0;

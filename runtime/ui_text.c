@@ -335,6 +335,16 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_OV_FMT_SIZE] = "%ux%u", [UI_MENU_OV_FMT_SCENE] = "%ux%u, %.0f%%",
     [UI_MENU_OV_FMT_FSR] = "AMD FSR 1, sharpness %d%%", [UI_MENU_OV_SCALE_NONE] = "none (1:1)",
     [UI_MENU_OV_SCALE_BILINEAR] = "bilinear",
+    [UI_MENU_TAB_MODS] = "Mods",
+    [UI_MENU_MODS_NONE] = "No Fuse mods are loaded. Scripts load from the folder in fuse_scripts; native plugins need "
+                          "fuse_native = 1 and a folder in fuse_plugins.",
+    [UI_MENU_MODS_SCRIPTS] = "Scripts",
+    [UI_MENU_MODS_PLUGINS] = "Native plugins",
+    [UI_MENU_MODS_HOOKS] = "%d hooks attached",
+    [UI_MENU_MODS_RELOAD] = "Reload scripts",
+    [UI_MENU_MODS_RELOAD_DESC] = "Loads the Luau scripts again from their folder without restarting the game: their hooks "
+                                 "come off, the edited scripts load and attach theirs. Native plugins stay as they are.",
+    [UI_MENU_MODS_RELOADED] = "Reloaded: %d script hooks",
 };
 
 static const char *const text_ru[UI_TEXT_COUNT] = {
@@ -651,6 +661,16 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_OV_FMT_SIZE] = "%ux%u", [UI_MENU_OV_FMT_SCENE] = "%ux%u, %.0f%%",
     [UI_MENU_OV_FMT_FSR] = "AMD FSR 1, резкость %d%%", [UI_MENU_OV_SCALE_NONE] = "нет (1:1)",
     [UI_MENU_OV_SCALE_BILINEAR] = "билинейное",
+    [UI_MENU_TAB_MODS] = "Моды",
+    [UI_MENU_MODS_NONE] = "Моды Fuse не загружены. Скрипты загружаются из папки в fuse_scripts; нативным плагинам нужны "
+                          "fuse_native = 1 и папка в fuse_plugins.",
+    [UI_MENU_MODS_SCRIPTS] = "Скрипты",
+    [UI_MENU_MODS_PLUGINS] = "Нативные плагины",
+    [UI_MENU_MODS_HOOKS] = "Перехватов: %d",
+    [UI_MENU_MODS_RELOAD] = "Перезагрузить скрипты",
+    [UI_MENU_MODS_RELOAD_DESC] = "Заново загружает скрипты Luau из их папки без перезапуска игры: их перехваты снимаются, "
+                                 "изменённые скрипты загружаются и ставят свои. Нативные плагины остаются как есть.",
+    [UI_MENU_MODS_RELOADED] = "Перезагружено: перехватов скриптов %d",
 };
 
 #define SWKBD_ONLY(name, ...) static const char *const name[UI_TEXT_COUNT] = {SWKBD(__VA_ARGS__)}
