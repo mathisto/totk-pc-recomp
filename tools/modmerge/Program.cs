@@ -24,6 +24,8 @@ using TkSharp.Extensions.LibHac;
 using TkSharp.IO.Writers;
 using TkSharp.Merging;
 
+if (args.Length > 0 && args[0] == "data") return DataEdits.Run(args[1..]);   // Fuse data edits (DataEdits.cs)
+
 static int Usage(string message)
 {
     Console.Error.WriteLine($"totk-modmerge: {message}");

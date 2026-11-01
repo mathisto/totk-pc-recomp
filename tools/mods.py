@@ -523,7 +523,7 @@ def dotnet():
 
 def build_modmerge(dn):
     """Builds tools/modmerge when its program is missing or older than its source."""
-    sources = [MODMERGE / 'Program.cs', MODMERGE / 'TotkModMerge.csproj']
+    sources = [MODMERGE / 'Program.cs', MODMERGE / 'DataEdits.cs', MODMERGE / 'TotkModMerge.csproj']
     if MODMERGE_DLL.is_file() and MODMERGE_DLL.stat().st_mtime >= max(s.stat().st_mtime for s in sources):
         return
     if not (MODMERGE / 'TkSharp' / 'TkSharp.sln').is_file():
@@ -745,7 +745,7 @@ def cmd_apply(args):
     if missing:
         raise SystemExit('these enabled mods are missing their files: ' + ', '.join(missing))
     print(f'{path}: {len(mods)} of {len(profile["mods"])} mods enabled; install {install} (game version {version})')
-    if not mods:
+    if not mods and not args.data_edits and not args.extra_mod:
         print(json.dumps(undeploy_overlay(install)))
         return launch(install, args, None) if args.play else None
 
@@ -761,6 +761,13 @@ def cmd_apply(args):
     out = work / 'merged' if work else resolve(merge.get('out', 'merged'), base)
     data = work / '.tkdata' if work else resolve(merge.get('data', '.tkdata'), base)
     log = work / 'merge.log' if work else resolve(merge.get('log', 'merge.log'), base)
+    for extra in args.extra_mod or []:   # Fuse packages' asset and TKCL content (fuse apply), after the profile's mods
+        mods = mods + [dict(name='fuse:' + extra.name, path=str(extra.resolve()), enabled=True)]
+    if args.data_edits:   # Fuse data edits: applied to vanilla by totk-modmerge's data mode, merged last as one more mod
+        edited = out.parent / (out.name + '-fuse-data')
+        run_data_edits(profile, base, args.data_edits.resolve(), edited, log.with_name(log.stem + '-data.log'))
+        if (edited / 'romfs').is_dir():
+            mods = mods + [dict(name='fuse-data', path=str(edited), enabled=True)]
     print(f'merging {len(mods)} mods with totk-modmerge (log {log}) ...', flush=True)
     t0 = time.monotonic()
     report = run_modmerge(profile, base, mods, out, data, log)
@@ -788,6 +795,26 @@ def cmd_apply(args):
     print(f'verified {checked} files as totk.exe\'s start check does: sizes, hashes and originals match')
     if args.play:
         launch(install, args, pinned)
+
+
+def run_data_edits(profile, base, edits, out, log):
+    """totk-modmerge data: the edits file `fuse deploy --data-out` wrote, applied to the vanilla files, into out."""
+    merge = profile['merge']
+    dn = dotnet()
+    if not dn:
+        raise SystemExit('dotnet missing: tools/modmerge needs the .NET 10 SDK')
+    build_modmerge(dn)
+    command = [dn, str(MODMERGE_DLL), 'data', '--keys', str(resolve(merge.get('keys', '~/.switch'), base)),
+               '--base', str(resolve(merge['base'], base)), '--update', str(resolve(merge['update'], base)),
+               '--version', merge['version'], '--edits', str(edits), '--out', str(out)]
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open('w', encoding='utf-8') as f:
+        done = subprocess.run(command, stdout=f, stderr=subprocess.STDOUT,
+                              env=dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1'))
+    text = log.read_text(encoding='utf-8', errors='replace').splitlines()
+    if done.returncode:
+        raise SystemExit(f'totk-modmerge data failed ({done.returncode}), log {log}:\n  ' + '\n  '.join(text[-10:]))
+    print('fuse data edits: ' + (text[-1] if text else 'done'))
 
 
 def launch(install, args, pinned):
@@ -839,6 +866,10 @@ def main():
     p.add_argument('--work', type=Path, help='folder for the merge output, TkSharp\'s store and the log (default: the '
                                              'profile\'s merge.out, merge.data and merge.log)')
     p.add_argument('--cpus', type=lambda s: int(s, 0), default=0xF00, help='CPU mask to pin to (0 = none)')
+    p.add_argument('--extra-mod', type=Path, action='append', help='one more mod (a folder with romfs/, or a .tkcl), '
+                                                                     'merged after the profile\'s mods (repeatable)')
+    p.add_argument('--data-edits', type=Path, help='a Fuse data-edits file (fuse deploy --data-out): applied to the '
+                                                   'vanilla files and merged last')
     p.add_argument('--res', help='game resolution WxH (default: output_res of totk.ini)')
     p.add_argument('--patch-python', help='Python 3.14 for make_romfs_patches.py (default: the profile\'s '
                                           'patch_python, else this Python when it is 3.14 or newer)')
