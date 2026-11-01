@@ -74,3 +74,7 @@ desktop.ini
 
 # Agent task worktrees (tools/worktree.py)
 /.worktrees/
+
+# tools/modmerge build output (dotnet build)
+/tools/modmerge/bin/
+/tools/modmerge/obj/

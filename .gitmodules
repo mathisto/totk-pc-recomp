@@ -1,0 +1,4 @@
+[submodule "tools/modmerge/TkSharp"]
+	path = tools/modmerge/TkSharp
+	url = https://github.com/mathisto/TkSharp.git
+	branch = fix-placeholder-truncation
