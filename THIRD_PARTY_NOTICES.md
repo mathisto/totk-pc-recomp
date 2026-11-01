@@ -57,7 +57,7 @@ These tools run on the developer's or player's machine during the build. They ar
 | hactool (the installer release ships it, see below) | https://github.com/SciresM/hactool @ `1d64a83450e025622f3468c28fc4164dad2c5ef6`, with patches from MacNativeGames | ISC | NCA and update container extraction |
 | Capstone | https://www.capstone-engine.org | BSD-3-Clause | ARM64 disassembly for analysis |
 | Unicorn | https://www.unicorn-engine.org | GPL-2.0 (Python bindings BSD) | Differential testing of the lifter; never linked into the game |
-| TkSharp (TKMM's merge library) and its NuGet dependencies | https://github.com/TKMM-Team/TkSharp @ `ee83fb1e70541600fe7a44a376ffe4bd3486f622`, with the placeholder fix of https://github.com/mathisto/TkSharp @ `67b87eee396715cf81ac345b64b252b071abe60a` (git submodule `tools/modmerge/TkSharp`), Copyright (c) 2024 TKMM-Team and Contributors | MIT | `tools/modmerge` (totk-modmerge): merging the player's mods before `tools/mods.py deploy` |
+| TkSharp (TKMM's merge library) and its NuGet dependencies | https://github.com/TKMM-Team/TkSharp @ `ee83fb1e70541600fe7a44a376ffe4bd3486f622`, with the placeholder fix of https://github.com/mathisto/TkSharp @ `67b87eee396715cf81ac345b64b252b071abe60a` (git submodule `tools/modmerge/TkSharp`), Copyright (c) 2024 TKMM-Team and Contributors | MIT | `tools/modmerge` (totk-modmerge): merging the player's mods for `tools/mods.py apply` and `deploy` |
 
 ## Distributed in the installer release
 
