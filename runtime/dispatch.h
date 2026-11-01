@@ -16,6 +16,7 @@ typedef struct RtModule {
     const uint64_t *addrs;    // <mod>_fn_addrs: guest function starts, strictly ascending
     const GuestFn *fns;       // <mod>_fn_ptrs: the lifted function for each start
     uint64_t count;           // <mod>_fn_count
+    volatile uint8_t *fz_bits;   // <mod>_fz_bits: a bit per function (by index above) FN_ENTER tests (fuse_hooks.c)
 } RtModule;
 
 // The module glue that tools/build_game.py writes for each build (build/<version>/modules.c), from layout.json and
@@ -36,6 +37,8 @@ void rt_dispatch_init(const RtModule *mods, int count);
 
 // The host function for a guest address, or NULL when nothing is there. Does not run guest code.
 GuestFn rt_dispatch_lookup(uint64_t pc);
+// The hook bitmap and bit index of the lifted function starting at pc: 1, or 0 when no function starts there.
+int rt_dispatch_fn_bit(uint64_t pc, volatile uint8_t **bits, uint64_t *index);
 
 // "0x7000001234 (main+0x1234)" for a guest address inside a module, else the bare address. Returns buf.
 const char *rt_guest_name(uint64_t pc, char *buf, int size);

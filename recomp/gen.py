@@ -220,6 +220,9 @@ class Emitter:
         self.hook_fns = set()          # callbacks the current chunk calls (chunk_text declares them)
         self.stats = Counter()
         self.unsupported = Counter()
+        # A function's index in the module's sorted function table (<mod>_fn_addrs): its bit in <mod>_fz_bits, the
+        # runtime hook bitmap FN_ENTER tests.
+        self.ordinal = {a: i for i, a in enumerate(sorted(starts))}
 
     def scan(self, insns, entry, end):
         """Labels and jump tables of one function: {pc: sorted targets} for resolved tables, 'all' for an
@@ -366,13 +369,13 @@ class Emitter:
             cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in range(entry, end, 4))
             redispatch = f'{MUSTTAIL} {fb}(c);'
             out = [f'static void {fb}(Cpu *c);',
-                   f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)});', f'    c->pc = {hx(entry)};',
+                   f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)}, {self.ordinal[entry]});', f'    c->pc = {hx(entry)};',
                    f'    {redispatch}', '}',
                    f'static void {fb}(Cpu *c) {{', f'    switch (c->pc) {{ {cases} default: break; }}',
                    f'    {MUSTTAIL} rt_dispatch(c);']
         else:
             redispatch = f'{MUSTTAIL} rt_dispatch(c);'
-            out = [f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)});']
+            out = [f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)}, {self.ordinal[entry]});']
             if fp.used:
                 out.append('    ' + fp.decl())
 
@@ -498,7 +501,8 @@ def chunk_text(name, number, emitter, fns):
     if emitter.uses_patches:
         protos += 'extern uint8_t rt_patch_on[];\n'
     protos += ''.join(f'void {cb}(Cpu *c);\n' for cb in sorted(emitter.hook_fns))
-    return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n\n' + protos + '\n'
+    bits = f'extern volatile uint8_t {name}_fz_bits[];\n#define FZ_BITS {name}_fz_bits\n'   # FN_ENTER's hook bitmap
+    return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n\n' + bits + protos + '\n'
             + '\n\n'.join(body) + '\n')
 
 
@@ -586,6 +590,8 @@ def table_text(name, addrs):
     lines.append(f'\n}};\nconst GuestFn {name}_fn_ptrs[] = {{\n')
     lines.append(',\n'.join(fname(a) for a in addrs))
     lines.append(f'\n}};\nconst uint64_t {name}_fn_count = {len(addrs)};\n')
+    # One bit per function, by its index above: set while runtime hooks are attached to it (runtime/fuse_hooks.c).
+    lines.append(f'volatile uint8_t {name}_fz_bits[{(len(addrs) + 7) // 8}];\n')
     return ''.join(lines)
 
 

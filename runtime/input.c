@@ -113,6 +113,45 @@ static void script_load(void) {
     rt_log("input: script %s, %d events", path, script_n);
 }
 
+// Presses an agent injects over DevLink (devlink_win.c): applied like script events, each until a tick of
+// frame_step_ticks. Their own small lock: the DevLink thread adds them while the game polls.
+static struct { int bit, stick; int32_t x, y; uint64_t until; } inject_ev[16];
+static int inject_n;
+static PlatMutex inject_lock = PLAT_MUTEX_INIT;
+
+int input_button_bit(const char *name) {
+    for (size_t i = 0; i < sizeof script_buttons / sizeof *script_buttons; i++)
+        if (!strcmp(name, script_buttons[i].name)) return script_buttons[i].bit;
+    return -1;
+}
+
+int input_inject(int bit, int stick, int32_t x, int32_t y, uint64_t ticks) {
+    plat_mutex_lock(&inject_lock);
+    int ok = inject_n < (int)(sizeof inject_ev / sizeof *inject_ev);
+    if (ok) inject_ev[inject_n++] = (typeof(inject_ev[0])){bit, stick, x, y, frame_step_ticks() + ticks};
+    plat_mutex_unlock(&inject_lock);
+    return ok;
+}
+
+static void inject_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
+    if (!__atomic_load_n(&inject_n, __ATOMIC_RELAXED)) return;
+    uint64_t tick = frame_step_ticks();
+    plat_mutex_lock(&inject_lock);
+    int k = 0;
+    for (int i = 0; i < inject_n; i++) {
+        if (tick >= inject_ev[i].until) continue;
+        if (inject_ev[i].stick) {
+            int32_t *s = inject_ev[i].stick == 1 ? sl : sr;
+            s[0] = inject_ev[i].x, s[1] = inject_ev[i].y;
+        } else {
+            *b |= 1ull << inject_ev[i].bit;
+        }
+        inject_ev[k++] = inject_ev[i];
+    }
+    inject_n = k;
+    plat_mutex_unlock(&inject_lock);
+}
+
 static void script_apply(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     if (!script_state) script_load();
     if (!script_n) return;
@@ -465,6 +504,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
         }
     }
     script_apply(&b, sl, sr);
+    inject_apply(&b, sl, sr);
     rec_apply(b, sl, sr);
     // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
     static int combo_held;

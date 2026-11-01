@@ -16,6 +16,10 @@ uint64_t input_a_press(void);   // when A last went down in what input_poll repo
 // With TOTK_LOCKON = 1: how many times the lock-on button (the game's RCLICK, which input_poll then hides) went down
 // and the right stick was flicked, since start. For the toggle lock-on (game_hooks.c).
 void input_lockon_counts(unsigned *presses, unsigned *flicks);
+// DevLink (devlink_win.c): the bit of a script button name (A, ZL, ...; -1 unknown), and an injected press of that bit
+// (stick 0) or stick position (stick 1 left, 2 right) for the next `ticks` 60 Hz ticks; 0 when 16 are pending.
+int input_button_bit(const char *name);
+int input_inject(int bit, int stick, int32_t x, int32_t y, uint64_t ticks);
 void input_block(int on);
 // The in-game menu (ui/menu.h): input_menu(1) when it opens (input_poll reports nothing, the cursor is released), (0) when
 // it closes (nothing until every button and stick direction is released). Independent of input_block.

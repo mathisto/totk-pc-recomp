@@ -170,6 +170,20 @@ void rt_dispatch_init(const RtModule *mods, int count) {
     __atomic_store_n(&g_ready, true, __ATOMIC_RELEASE);
 }
 
+int rt_dispatch_fn_bit(uint64_t pc, volatile uint8_t **bits, uint64_t *index) {
+    const RtModule *m = module_at(pc);
+    if (!m || !m->fz_bits) return 0;
+    uint64_t lo = 0, hi = m->count;   // binary search in the ascending function table
+    while (lo < hi) {
+        uint64_t mid = lo + (hi - lo) / 2;
+        if (m->addrs[mid] < pc) lo = mid + 1; else hi = mid;
+    }
+    if (lo == m->count || m->addrs[lo] != pc) return 0;
+    *bits = m->fz_bits;
+    *index = lo;
+    return 1;
+}
+
 GuestFn rt_dispatch_lookup(uint64_t pc) {
     uint64_t i = __builtin_rotateright64(pc - D.lo, 2);   // a misaligned pc lands far above D.slots
     if (i < D.slots && D.slot[i]) return (GuestFn)(D.anchor + D.slot[i]);

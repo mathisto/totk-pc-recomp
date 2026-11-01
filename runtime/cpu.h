@@ -69,10 +69,20 @@ typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
 typedef uint8_t __attribute__((may_alias)) u8a;
 
-// Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
+// Function-entry gate (runtime/fuse_hooks.c): one predictable branch per call while no runtime hook is attached
+// anywhere. While one is, the function's bit in its module's hook bitmap (FZ_BITS, defined by each generated chunk;
+// k is the function's index in the module's function table, a constant) says whether it has hooks: one test-byte
+// instruction against a table of a bit per function (about 31 KB for main), small enough to stay in cache. fz_enter
+// runs the hooks around the body and returns 1 when it ran the function in its place. (g_fnprof kept its name from
+// the function-entry profiler stub this replaced.)
 extern volatile int g_fnprof;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
-#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
+int fz_enter(struct Cpu *c, uint64_t addr);
+#define FN_ENTER(a, k)                                                                                   \
+    do {                                                                                                 \
+        if (__builtin_expect(g_fnprof, 0) && (FZ_BITS[(k) >> 3] & (1u << ((k) & 7))) && fz_enter(c, (a))) \
+            return;                                                                                      \
+    } while (0)
 
 #define LD8(a)  (*(const u8a *)(uintptr_t)(a))
 #define LD16(a) (*(const u16u *)(uintptr_t)(a))

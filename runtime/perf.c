@@ -7,6 +7,7 @@
 
 #include "cfg.h"
 #include "flight.h"
+#include "fuse_hooks.h"
 #include "gfx.h"
 #include "host.h"
 #include "perfmon.h"
@@ -259,6 +260,7 @@ void perf_present(uint64_t frame) {
     uint64_t rep = ft_frame(frame, now, d);   // d is 0 on the first present: it only starts the period
     ab_b += rt_ab();
     cpu_placement();
+    fz_present();
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);

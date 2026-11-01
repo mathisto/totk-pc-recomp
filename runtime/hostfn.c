@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "devlink.h"
+#include "fuse_hooks.h"
 #include "host.h"
 
 #define MAX_HOSTFN 4096   // dispatch.c holds HOST_CAP / 2 host functions
@@ -175,6 +177,8 @@ void hostfn_seal(void) {
     sealed = 1;
     int n = rt_linked_modules(mods, 16);
     rt_dispatch_init(mods, n);
+    fz_init();
+    devlink_init();
 }
 
 uint64_t hostfn_calls(void) {

@@ -136,5 +136,6 @@ uint64_t nvn_proc_address(const char *name);               // synthetic host add
 typedef struct { uint64_t frames, nvn_calls, nvn_distinct, unimplemented, validation_errors, shader_failures,
                  draws_skipped; } GfxStats;
 GfxStats gfx_stats(void);
+void rt_shot_request(const char *path, volatile int *done);   // boot.c: a PNG of the next presented frame (DevLink)
 void rt_frame_presented(const tex_t *t, uint64_t n);       // boot.c: --frames N ends the run after the Nth present
                                                            // (saves --shot first through read_texels)

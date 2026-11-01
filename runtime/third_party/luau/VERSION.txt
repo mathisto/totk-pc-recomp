@@ -1,0 +1,1 @@
+Luau 0.745 (https://github.com/luau-lang/luau/releases/tag/0.745, source tarball sha256 53c22773bace6cabbabaead576fbc08d11a0317fce11a3dbf9d027dda6849248): Common, Ast, Bytecode, Compiler, VM, unmodified. MIT (LICENSE.txt, lua_LICENSE.txt).

@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "devlink.h"
 #include "cfg.h"
 #include "host.h"
 #include "platform/platform.h"
@@ -50,6 +51,7 @@ static uint64_t g_log_bytes;
 
 void rt_log_raw(const char *p, size_t n) {
     fwrite(p, 1, n, stderr);
+    devlink_log_tap(p, n);
     int state = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE);
     if (state == LOG_EARLY) {
         size_t at = __atomic_fetch_add(&g_log_early_n, n, __ATOMIC_RELAXED);

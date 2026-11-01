@@ -285,12 +285,44 @@ static void series_shot(const tex_t *t, uint64_t n) {
     free(px);
 }
 
+// A shot of the next presented frame for DevLink: the path, and done set to 1 (written) or -1 (the presented texture
+// is not 8-bit RGBA/BGRA) once handled on the present thread.
+static char shot_req[PLAT_PATH_MAX];
+static volatile int *shot_done;
+static PlatMutex shot_lock = PLAT_MUTEX_INIT;
+
+void rt_shot_request(const char *path, volatile int *done) {
+    plat_mutex_lock(&shot_lock);
+    snprintf(shot_req, sizeof shot_req, "%s", path);
+    shot_done = done;
+    plat_mutex_unlock(&shot_lock);
+}
+
+static void requested_shot(const tex_t *t) {
+    if (!__atomic_load_n(&shot_done, __ATOMIC_ACQUIRE)) return;
+    plat_mutex_lock(&shot_lock);
+    volatile int *done = shot_done;
+    shot_done = NULL;
+    char path[PLAT_PATH_MAX];
+    snprintf(path, sizeof path, "%s", shot_req);
+    plat_mutex_unlock(&shot_lock);
+    if (!done) return;
+    int fmt = t->d.format;
+    if (fmt != NVN_FORMAT_BGRA8 && fmt != NVN_FORMAT_BGRA8_SRGB && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB) {
+        *done = -1;
+        return;
+    }
+    save_shot(t, path);
+    *done = 1;
+}
+
 // A --seconds run ends at the first present after the world clock (game time since the save's first frame,
 // frame_step_world_us) passed S seconds, so a run covers the same game time at any frame rate; any other frame is
 // counted by the back end only.
 void rt_frame_presented(const tex_t *t, uint64_t n) {
     const RtConfig *cfg = rt_config();
     series_shot(t, n);
+    requested_shot(t);
     int64_t w = cfg->seconds ? frame_step_world_us() : -1;
     if (w < 0 || (double)w < cfg->seconds * 1e6) return;
     if (cfg->shot) save_shot(t, cfg->shot);
