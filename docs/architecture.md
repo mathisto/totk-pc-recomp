@@ -111,6 +111,12 @@ Every guest thread is a host thread. TotK assumes Horizon's scheduler: three app
   swapchain, which FSR 1 or the blit then scale; the in-game menu is drawn into an RGBA8 image and blended on at the
   HUD's white. Without an HDR10 surface format (Windows with "Use HDR" off, a compositor without colour management)
   the swapchain stays SDR. `TOTK_SHOTS` reads the window texture, so its pictures clip highlights in HDR.
+  RCAS) on the present.
+- DLAA (`vk_dlaa.c`, `dlaa`, off by default). NVIDIA DLSS at the scene's own size, through the driver's NGX core loaded
+  at run time (no SDK code compiled in). It runs on the R11G11B10F light target right before the bloom chain's first
+  pass, so post effects and the HUD read the anti-aliased picture. The scene's draws get a sub-pixel Halton viewport
+  jitter; motion vectors are camera-only, reprojected from the scene depth through this and last frame's
+  view-projection of the scene camera block (constant bank c4). `fxaa` switches the game's own FXAA pass.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.
 - ASTC textures are uploaded as they are where the device reports `textureCompressionASTC_LDR`, and decoded by a compute shader everywhere else (`vk_astc.c`, `TOTK_ASTC`). The CPU decoder (`tex_astc*.c`) is the fallback and the test oracle.
 - Draw state. A draw whose program, bound state and textures repeat reuses the previous draw's shaders and skips rebuilding its descriptor sets; descriptor sets are written through update templates (`vk_exec_draw.c`, `vk_pipeline.c`).
