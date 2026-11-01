@@ -163,6 +163,9 @@ static PlatMutex dfl_lock;
 static uint64_t dfl_last_press, dfl_last_ns;
 static int dfl_last_tier;
 
+// The player actor, as deflect_flags last saw it.
+static uint64_t dfl_player;
+
 // The forced deflect the player side still has to play: the defender and when.
 static uint64_t dfl_pending_actor, dfl_pending_ns;
 
@@ -200,6 +203,7 @@ void deflect_flags(Cpu *c) {
     if ((flags & 3) != 1) return;   // not guarded, or already a perfect guard
     uint64_t def = LD64(c->x[29] - 0x40), atk = LD64(c->x[29] - 0x30);
     if (!is_player(def)) return;
+    __atomic_store_n(&dfl_player, def, __ATOMIC_RELAXED);
     deflect_cfg();
     uint64_t id = (uint64_t)LD32(c->x[20] + 0x3c) << 32 | LD32(c->x[20] + 0x38), now = plat_now_ns(), press = 0;
     int tier = -1, locked = 0;
@@ -301,6 +305,40 @@ void deflect_reaction(Cpu *c) {
                broken ? ": guard break -> repel" : "");
 }
 
+// No shield wear on a deflect (ERR: a deflect costs the shield nothing). A blocked hit costs the player no health in
+// TotK, only the shield's durability.
+// - game::life::DamageCalculatorExtensionEquipment::calcCustomInternalDamage (main+0x1177264) is the shield's own
+//   damage. While its owner guards, it reads the owner's guard result (x24, the owner's components +0x2f8; GuardType at
+//   +0x100) and wears the shield, by DamageGlobalParam's shield rate, only for types 1, 3, 4 and 5. A perfect guard (6)
+//   costs nothing natively.
+// - The hook sits on that test (main+0x11776b0, `cmp w8, #5`, w8 the type, x22 the owner's EquipmentUser) and answers
+//   6 for the player's shield when the guard result is an attack decided a deflect of either tier. The record's attack
+//   id is at +0xf4, which the function itself compares a little later (verified in game: every guarded hit's id).
+// - Fire and shock through a shield (Chemical::onGuardHit) still apply.
+// - deflect_log: one line per guard result the test sees.
+void deflect_wear(Cpu *c) {
+    uint32_t type = (uint32_t)c->x[8];
+    if (type > 5 || !(0x3au >> type & 1)) return;
+    uint64_t player = __atomic_load_n(&dfl_player, __ATOMIC_RELAXED), comps = player ? LD64(player + 0x228) : 0;
+    if (!comps || c->x[22] != LD64(comps + 0x230)) return;
+    FIRST_RUN("deflect_wear");
+    uint64_t rec = c->x[24], id = (uint64_t)LD32(rec + 0xf8) << 32 | LD32(rec + 0xf4), now = plat_now_ns();
+    int tier = -1;
+    plat_mutex_lock(&dfl_lock);
+    for (int i = 0; id && i < 16; i++)
+        if (dfl_hits[i].id == id && now - dfl_hits[i].ns < DFL_HIT_NS) tier = dfl_hits[i].tier;
+    plat_mutex_unlock(&dfl_lock);
+    int cancel = tier == TIER_DEFLECT || tier == TIER_PERFECT;
+    if (cancel) c->x[8] = 6;
+    deflect_cfg();
+    // One line per hit and answer: the test can run again for the same guard result.
+    static uint64_t logged;
+    uint64_t key = id ^ (uint64_t)type << 56;
+    if (dfl.log && __atomic_exchange_n(&logged, key, __ATOMIC_RELAXED) != key)
+        rt_log("deflect: shield wear for %#llx (type %u, %s): %s", (unsigned long long)id, type,
+               tier < 0 ? "no decision" : tier_name[tier], cancel ? "cancelled" : "kept");
+}
+
 // Set lockon: Elden Ring style toggle lock-on, so guard (ZL) taps for the deflect no longer drop the lock.
 // - Natively, game::ai::execute::ExecutePlayerCalcKey::updateImpl_ turns a held ZL into a lock-on request every frame
 //   (the player's AttentionReceiver +0x194 |= 0x10), and the lock holds only while the request keeps coming.
@@ -311,6 +349,8 @@ void deflect_reaction(Cpu *c) {
 // - A right-stick flick while locked drops the request for one frame. That is the game's own target switch: release
 //   and press again within its window, and the next candidate by its score.
 // - ZL still reaches the game, so guard, perfect guard, side-hop and backflip are unchanged.
+// - Natively a lock implies a held ZL, so the shield posture follows the lock: the shield is raised toward the target
+//   for as long as the lock lasts. A second hook makes it follow ZL, as Elden Ring's lock-on leaves the guard down.
 // Notes: totk-deflect-research/re/LOCKON.md in the author's scratch.
 // totk.ini: lockon = 1 (read at start); totk.ini's bind_RCLICK picks the button.
 
@@ -362,5 +402,17 @@ void lockon_request(Cpu *c) {
     int request = lk.on && !lk.drop;
     lk.drop = 0;
     c->x[22] = (c->x[22] & ~4ull) | (request ? 4u : 0u);
+}
+
+// main+0xd8aa54, `cmp w10, #2` in the player's shield posture (an AS parameter set every frame, main+0xd8a9e0): w10 the
+// AttentionReceiver's lock state with bit0 cleared (2: starting or locked, which picks the lock posture, the shield
+// toward the target); x22 the Player component, its virtual-key hold mask at [+0x48] (ZL is bit 2, the posture's next
+// test). Locked without ZL reads as unlocked, so the posture falls through to the ZL test and the shield stays down.
+void lockon_posture(Cpu *c) {
+    if ((uint32_t)c->x[10] != 2) return;
+    uint64_t keys = LD64(c->x[22] + 0x48);
+    if (keys && LD8(keys) & 4) return;
+    FIRST_RUN("lockon_posture");
+    c->x[10] = 0;
 }
 #endif
