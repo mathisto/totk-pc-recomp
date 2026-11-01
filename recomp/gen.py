@@ -208,14 +208,16 @@ def partition(est, max_fns, max_bytes, big_fn):
 class Emitter:
     """C for the functions of one module. starts is the set of every function start of the module."""
 
-    def __init__(self, mod, starts, patched=None, reg_locals=regs.LOCALS, callee_saved=True, spins=None):
+    def __init__(self, mod, starts, patched=None, reg_locals=regs.LOCALS, callee_saved=True, spins=None, hooks=None):
         self.mod = mod
         self.starts = starts
         self.patched = patched or {}   # {address: (set index, [replacement words])} (recomp/patches.py)
         self.spins = spins or {}       # {spin wait back-edge: its head} (recomp/patches.py `spin`)
+        self.hooks = hooks or {}       # {address: (set index, callback)} (recomp/patches.py `hook`)
         self.reg_locals = reg_locals   # recomp/regs.py: registers per function in C locals
         self.kept = regs.CALLEE_SAVED if callee_saved else frozenset()   # not reloaded after a call
         self.uses_patches = False
+        self.hook_fns = set()          # callbacks the current chunk calls (chunk_text declares them)
         self.stats = Counter()
         self.unsupported = Counter()
 
@@ -414,6 +416,14 @@ class Emitter:
             if a in labels:
                 emit(None, f'L_{a:x}:;')
             k = ins.kind
+            if a in self.hooks:
+                # recomp/patches.py `hook`: runtime C ahead of the instruction, with the Cpu current around it. It
+                # belongs to instruction i, so the register plan spills there; the instruction is then lifted as usual.
+                hk, cb = self.hooks[a]
+                self.hook_fns.add(cb)
+                self.uses_patches = True
+                self.stats['hooks'] += 1
+                emit(i, f'    if (rt_patch_on[{hk}]) {{ {spill}{cb}(c);{reload} }}')
             if a in self.patched:
                 emit(i, patch(i, ins, a))
             elif k == 'op':
@@ -455,7 +465,10 @@ class Emitter:
             for i, line in body:
                 if i is not None:
                     texts[i] += line
+            # A hooked instruction is never clean: its RELOAD is the hook's, before the instruction writes its own
+            # registers.
             clean = {i for i, ins in enumerate(insns) if entry + 4 * i not in self.patched
+                     and entry + 4 * i not in self.hooks
                      and (ins.kind in ('bl', 'blr') or (ins.kind == 'op' and regs.RELOAD in texts[i]))}
             rp = regs.plan(texts, succ, clean, self.reg_locals, self.kept)
             if rp.regs:
@@ -475,6 +488,7 @@ def chunk_text(name, number, emitter, fns):
     """C text of one chunk. fns: [(entry, end)]."""
     body, refs = [], set()
     emitter.uses_patches = False
+    emitter.hook_fns = set()
     for entry, end in fns:
         lines, r = emitter.function(entry, end)
         body.append('\n'.join(lines))
@@ -483,6 +497,7 @@ def chunk_text(name, number, emitter, fns):
     protos = ''.join(f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs))
     if emitter.uses_patches:
         protos += 'extern uint8_t rt_patch_on[];\n'
+    protos += ''.join(f'void {cb}(Cpu *c);\n' for cb in sorted(emitter.hook_fns))
     return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n\n' + protos + '\n'
             + '\n\n'.join(body) + '\n')
 
@@ -538,7 +553,8 @@ def _emitter(name):
         mod = Module(name, path, base, 'c')
         e = _W['emitters'][name] = Emitter(mod, set(_W['starts'][name].tolist()),
                                            _W['patches'].for_module(name, base),
-                                           spins=_W['patches'].spins_for(name, base), **_W['opts'])
+                                           spins=_W['patches'].spins_for(name, base),
+                                           hooks=_W['patches'].hooks_for(name, base), **_W['opts'])
     return e
 
 

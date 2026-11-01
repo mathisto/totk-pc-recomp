@@ -34,6 +34,36 @@ static const struct { const char *name, *env; int on; } sets[] = {
 #undef X
 };
 static void *page;
+
+// recomp/patches.py `data` lines: words outside .text (the lifted C reads them from guest memory), written once at
+// start for the sets that are on. The loader has sealed rodata read-only (loader.c), so a read-only page is opened
+// for the write and sealed again. A word that is not the expected original is left alone and logged.
+#ifndef RT_PATCH_DATA
+#define RT_PATCH_DATA(X)
+#endif
+static void apply_data(void) {
+    static const struct { int set; uint64_t addr; uint32_t orig, repl; } words[] = {
+#define X(k, a, o, r) {k, a, o, r},
+        RT_PATCH_DATA(X)
+#undef X
+        {-1, 0, 0, 0}};
+    for (size_t i = 0; words[i].set >= 0; i++) {
+        if (!rt_patch_on[words[i].set]) continue;
+        uint64_t a = words[i].addr, pg = a & ~0xFFFull, end = 0;
+        uint32_t have = *(volatile uint32_t *)(uintptr_t)a;
+        if (have != words[i].orig) {
+            rt_log("patches: data %#llx holds %08x, not %08x; left alone", (unsigned long long)a, have, words[i].orig);
+            continue;
+        }
+        int ro = plat_mem_state(pg, pg + 0x1000, &end) == PLAT_PROT_READ;
+        if (ro && !plat_mem_protect(pg, 0x1000, PLAT_PROT_RW))
+            rt_fatal("patches: cannot open %#llx for a data patch", (unsigned long long)pg);
+        *(volatile uint32_t *)(uintptr_t)a = words[i].repl;
+        if (ro) plat_mem_protect(pg, 0x1000, PLAT_PROT_READ);
+        rt_log("patches: data %#llx %08x -> %08x (set %s)", (unsigned long long)a, words[i].orig, words[i].repl,
+               sets[words[i].set].name);
+    }
+}
 #endif
 
 void rt_patches_init(void) {
@@ -53,6 +83,7 @@ void rt_patches_init(void) {
         if (n >= sizeof list) n = sizeof list - 1;
     }
     rt_log("patches: %s (page %#llx)", list, RT_PATCH_PAGE);
+    apply_data();
 #endif
 }
 

@@ -974,3 +974,17 @@ spin sdk 3d3250 3d3270   # 9 instructions; loads
 # goes in just before the rounding, as the community's shadow resolution mods do (1.1.0: mov w11, #1024 over the
 # computation). Found by a write watch on the size field (the writer was this function, and no other).
 site shadow main cec22c 11001d6b @page:x11 b9405d6b 11001d6b   # add w11, w11, #7 -> adrp x11, page; ldr w11, [x11, #92]; add w11, w11, #7
+
+# The Second Quest (GameBanana 479009), its code half for 1.2.1: the IPS for main (build 9B4E4365...) and the seven
+# inline hooks of its exlaunch module "MSFix" (exefs/subsdk9, build 8a05c481...), whose callbacks are in
+# runtime/game_hooks.c. Off unless the mod is installed: tsq = 1 in totk.ini (TOTK_TSQ). Read at start.
+set tsq      TOTK_TSQ            0
+site tsq     main 12b8edc d2804009 d2808009   # mov x9, #0x200 -> #0x400 in ModuleMgr::getModuleCreateArg (IPS)
+data tsq     main 381c444 0000000f 0fffffff   # rodata 15 -> 0x0fffffff: Mineru's weapon durability cap (IPS)
+hook tsq     main 198c59c 97ba095c tsq_sword_resurrect # bl main+0x80eb0c in ResurrectMasterSword
+hook tsq     main 198c6c0 97ba0913 tsq_sword_resurrect # bl main+0x80eb0c in ResurrectMasterSword
+hook tsq     main 66589c  b904ca68 tsq_sword_equip     # str w8, [x19, #0x4c8] in DynamicEquipment::preCalc
+hook tsq     main 1d53d98 aa0003f3 tsq_stamina_arm     # mov x19, x0 in ExecutePlayerChargeAttack
+hook tsq     main 1d54774 1e210800 tsq_stamina_arm     # fmul s0, s0, s1 in ExecutePlayerChargeLSwordSpin
+hook tsq     main 1d85a64 aa0003f4 tsq_stamina_arm     # mov x20, x0 in ExecutePlayerSpecialAttack
+hook tsq     main 9f1cb0  bd007661 tsq_stamina_hold    # str s1, [x19, #0x74] in StaminaCalculator::calcRecovery
