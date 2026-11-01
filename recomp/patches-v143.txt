@@ -10,6 +10,7 @@ set cloth    TOTK_CLOTH_REALTIME 1
 set bounce   TOTK_HIGHFPS_FIX    1
 set output   TOTK_PATCH_OUTPUT   0
 set scene    TOTK_PATCH_SCENE    0
+set shadow   TOTK_PATCH_SHADOW   0
 
 # 60 fps: the adaptive present-interval controller (main+0x2db174, 1.2.1 0x8f26c8) gets the minimum interval 1.
 site fps60 main 2db204 6b08015f 7100055f   # clamp: cmp w10, #1 (was cmp w10, w8 = minimum)
@@ -976,3 +977,8 @@ spin subsdk0 1c4e54 1c4e60   # 4 instructions; loads
 spin sdk 2d3654 2d3668   # 6 instructions; loads
 spin sdk 443864 443884   # 9 instructions; loads
 spin sdk 541e54 541f98   # 32 instructions; loads
+
+# Sun shadow map size (patches-v121.txt explains the set and the page). 1.4.3 interpolates the size between a minimum
+# and the base and rounds it up to 8 at main+0x683604; the rounded value is the width (+0x3d8) and, through the packed
+# store at +0xf4, the height (+0x3f8). The page's size goes in just before the rounding.
+site shadow main 683604 11001d6b @page:x11 b9405d6b 11001d6b   # add w11, w11, #7 -> adrp x11, page; ldr w11, [x11, #92]; add w11, w11, #7

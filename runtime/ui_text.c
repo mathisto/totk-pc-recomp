@@ -72,6 +72,11 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_ANISO] = "Texture filtering",
     [UI_MENU_ANISO_DESC] = "Anisotropic filtering of surface textures: ground, roads and walls seen at a shallow angle stay sharp into the distance instead of blurring. Game: the level the game asks for, as on the Switch.",
     [UI_MENU_ANISO_GAME] = "Game",
+    [UI_MENU_SHADOW_RES] = "Shadow map size",
+    [UI_MENU_SHADOW_RES_DESC] = "Size of the sun's shadow map. The game's own size changes with the view, down to about 400 "
+                                "near the ground, so leaf shadows look blocky and jump; a fixed size keeps them still and "
+                                "sharper. Above 1024 the shadows cost more GPU time and video memory.",
+    [UI_MENU_SHADOW_RES_GAME] = "Game (changes)",
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
     [UI_MENU_COLOR] = "Colour",
@@ -335,6 +340,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_ANISO] = "Фильтрация текстур",
     [UI_MENU_ANISO_DESC] = "Анизотропная фильтрация текстур поверхностей: земля, дороги и стены под острым углом остаются чёткими вдали, а не размываются. Игра: уровень, который запрашивает игра, как на Switch.",
     [UI_MENU_ANISO_GAME] = "Игра",
+    [UI_MENU_SHADOW_RES] = "Размер карты теней",
+    [UI_MENU_SHADOW_RES_DESC] = "Размер карты теней от солнца. Собственный размер игры меняется вместе с видом, у земли до "
+                                "примерно 400, поэтому тени листвы выглядят квадратными и дёргаются; постоянный размер делает "
+                                "их ровными и чётче. Выше 1024 тени требуют больше времени GPU и видеопамяти.",
+    [UI_MENU_SHADOW_RES_GAME] = "Как в игре (меняется)",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
     [UI_MENU_COLOR] = "Цвет",

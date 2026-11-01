@@ -505,6 +505,15 @@ static void row_render_scale(void) {
     opt_choice_list("TOTK_RENDER_SCALE", UI_MENU_RENDER_SCALE, vals, names, N, UI_MENU_RENDER_SCALE_DESC);
 }
 
+static void row_shadow_res(void) {
+    static const char *const vals[] = {"game", "512", "768", "1024", "1536", "2048"};
+    enum { N = sizeof vals / sizeof *vals };
+    const char *names[N];
+    names[0] = menu_text(UI_MENU_SHADOW_RES_GAME);
+    for (int i = 1; i < N; i++) names[i] = vals[i];
+    opt_choice_list("TOTK_SHADOW_RES", UI_MENU_SHADOW_RES, vals, names, N, UI_MENU_SHADOW_RES_DESC);
+}
+
 static void row_gpu(void) {
     const char *vals[MAX_GPUS + 1], *names[MAX_GPUS + 1];
     char idx[MAX_GPUS][4];
@@ -623,6 +632,7 @@ static void tab_screen(float scale) {
     opt_group(UI_MENU_GRAPHICS);
     row_output_res();
     row_render_scale();
+    row_shadow_res();
     static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
     opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
     opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");

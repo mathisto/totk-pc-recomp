@@ -157,6 +157,10 @@
 # color_contrast = 100
 # color_saturation = 100
 # color_gamma = 1
+# Sun shadow map size: game (the game's own, which changes with the view and drops to about 400 near the ground, so
+# leaf shadows look blocky and jump) or a fixed 512, 768, 1024, 1536 or 2048. Above 960 the texture heap grows with it.
+# Read at start.
+# shadow_res = 1024
 
 [language]
 # Language: a Windows locale such as de-DE, or a Switch code (en-US, ja, zh-Hant, ...). Default: the Windows locale.
