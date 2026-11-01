@@ -77,6 +77,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                 "near the ground, so leaf shadows look blocky and jump; a fixed size keeps them still and "
                                 "sharper. Above 1024 the shadows cost more GPU time and video memory.",
     [UI_MENU_SHADOW_RES_GAME] = "Game (changes)",
+    [UI_MENU_LOD_DETAIL] = "Distant model detail",
+    [UI_MENU_LOD_DETAIL_DESC] = "Distant models keep the detail they have up close instead of switching to simpler versions. Game version 1.2.1 only.",
+    [UI_MENU_LOD_STEADY] = "Steady detail under load",
+    [UI_MENU_LOD_STEADY_DESC] = "Skips the game's setup for lowering model and texture detail when the frame rate drops, as the emulator mod Disable LOD Quality Reduction does. Game version 1.2.1 only.",
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
     [UI_MENU_COLOR] = "Colour",
@@ -345,6 +349,10 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                 "примерно 400, поэтому тени листвы выглядят квадратными и дёргаются; постоянный размер делает "
                                 "их ровными и чётче. Выше 1024 тени требуют больше времени GPU и видеопамяти.",
     [UI_MENU_SHADOW_RES_GAME] = "Как в игре (меняется)",
+    [UI_MENU_LOD_DETAIL] = "Детализация дальних моделей",
+    [UI_MENU_LOD_DETAIL_DESC] = "Дальние модели сохраняют детализацию, как вблизи, а не переключаются на упрощённые версии. Только для версии игры 1.2.1.",
+    [UI_MENU_LOD_STEADY] = "Стабильная детализация под нагрузкой",
+    [UI_MENU_LOD_STEADY_DESC] = "Пропускает настройку игры, снижающую детализацию моделей и текстур при падении частоты кадров, как эмуляторный мод Disable LOD Quality Reduction. Только для версии игры 1.2.1.",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
     [UI_MENU_COLOR] = "Цвет",
