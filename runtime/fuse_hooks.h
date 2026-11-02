@@ -54,12 +54,18 @@ int fz_deployed_files(const char *dir, const char *ext, fz_deployed_fn cb, void 
 // there is no manifest.
 typedef void (*fz_config_fn)(const char *id, const char *entry, void *user);
 int fz_deployed_config(const char *dir, fz_config_fn cb, void *user);
+// Each package's declared capabilities in the same manifest: cb(id, "") once for a package that has the list (its
+// scripts are held to it), then cb(id, capability) for each. The number of packages with a list; -1 without a manifest.
+int fz_deployed_caps(const char *dir, fz_config_fn cb, void *user);
 // 1 when the SHA-256 of [data, data+n) is the lower-case hex digest want.
 int fz_file_sha256_hex(const void *data, size_t n, const char *want);
 // ExeFS patches (fuse_patches.c): the deployed .fzpatch files of TOTK_FUSE_SCRIPTS, written into the modules they name
 // by build id. The loader calls it once, after loading the images and before relocating them.
 typedef struct { const char *name; uint64_t base, text_end, data_end; char bid[65]; } FzPatchModule;   // offsets from base
 void fz_patches_apply(const FzPatchModule *mods, int n);
+// A layout field from the same file: 1 and its offset and kind ("u32", "f32", "ptr", "*Type" or a type name) when
+// type has field (field NULL: when type has any field).
+int fz_layout(const char *type, const char *field, uint64_t *offset, const char **kind);
 // The guest address of a named function from TOTK_FUSE_SYMBOLS (main base + its offset); 0 when unknown.
 uint64_t fz_sym(const char *name);
 

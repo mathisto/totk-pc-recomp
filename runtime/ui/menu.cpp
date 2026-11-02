@@ -738,6 +738,7 @@ static struct {
     char path[1024], file[128];
     char id[72], version[32], name[96], tier[16], authors[160], caps[200], summary[200];
     char sha256[72], replaces[240];   // what card checked (install takes exactly those bytes); what it would replace
+    char overlaps[240];               // enabled mods that change the same data, hooks, files or bytes ("-": none)
     int replaces_remote;              // the installed package came from an index or URL: only the manager replaces it
     char message[300];   // DROP_DONE / DROP_FAILED: the outcome, already formatted
 } g_drop;
@@ -786,6 +787,7 @@ static void drop_check(void) {   // worker thread
     card_field(out, "summary", g_drop.summary, sizeof g_drop.summary);
     card_field(out, "sha256", g_drop.sha256, sizeof g_drop.sha256);
     card_field(out, "replaces", g_drop.replaces, sizeof g_drop.replaces);
+    card_field(out, "overlaps", g_drop.overlaps, sizeof g_drop.overlaps);
     char remote[4];
     card_field(out, "replaces_remote", remote, sizeof remote);
     g_drop.replaces_remote = !strcmp(remote, "1");
@@ -880,6 +882,8 @@ static void drop_card(void) {
         ImGui::Text(menu_text(UI_MENU_MODS_DROP_BY), g_drop.authors);
         ImGui::TextDisabled("%s", menu_text(UI_MENU_MODS_DROP_UNVERIFIED));   // a local file: the author is self-declared
         if (strcmp(g_drop.replaces, "-")) ImGui::TextWrapped(menu_text(UI_MENU_MODS_DROP_REPLACES), g_drop.replaces);
+        if (*g_drop.overlaps && strcmp(g_drop.overlaps, "-"))   // an older manager prints no overlaps line
+            ImGui::TextWrapped(menu_text(UI_MENU_MODS_DROP_OVERLAPS), g_drop.overlaps);
         UiTextId kind = native ? UI_MENU_MODS_DROP_KIND_NATIVE : !strcmp(g_drop.tier, "data") ? UI_MENU_MODS_DROP_KIND_DATA
                                                                                               : UI_MENU_MODS_DROP_KIND_SCRIPT;
         if (native) ImGui::PushStyleColor(ImGuiCol_Text, warn_c);

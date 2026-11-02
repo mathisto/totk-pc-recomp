@@ -378,6 +378,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_DROP_CLOSE] = "Close",
     [UI_MENU_MODS_DROP_UNVERIFIED] = "From a file on this PC: the author is what the package says, not verified.",
     [UI_MENU_MODS_DROP_REPLACES] = "Replaces the installed version %s.",
+    [UI_MENU_MODS_DROP_OVERLAPS] = "Changes some of the same things as %s. The command fuse overlaps shows which one wins.",
     [UI_MENU_MODS_DROP_REMOTE_OUTSIDE] = "The installed version came from a mod index or download; replace it with the "
                                          "fuse manager, outside the game.",
 };
@@ -738,6 +739,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MODS_DROP_CLOSE] = "Закрыть",
     [UI_MENU_MODS_DROP_UNVERIFIED] = "Из файла на этом ПК: автор указан самим пакетом и не проверен.",
     [UI_MENU_MODS_DROP_REPLACES] = "Заменяет установленную версию %s.",
+    [UI_MENU_MODS_DROP_OVERLAPS] = "Меняет то же, что и %s. Команда fuse overlaps покажет, чей вариант действует.",
     [UI_MENU_MODS_DROP_REMOTE_OUTSIDE] = "Установленная версия получена из каталога модов или загрузки; замените её "
                                          "менеджером fuse вне игры.",
 };

@@ -267,6 +267,12 @@ typedef struct { char *name; uint64_t offset; } FzSym;
 static FzSym *syms;
 static size_t nsyms;
 
+// Layouts, in the same file: `"Type.field" = { offset = 0x10, type = "f32" }` lines (fuse.view in scripts). The symbol
+// pattern never matches them (its value is a number).
+typedef struct { char type[96], field[96], kind[64]; uint64_t offset; } FzField;
+static FzField *fields;
+static size_t nfields;
+
 static int sym_order(const void *a, const void *b) { return strcmp(((const FzSym *)a)->name, ((const FzSym *)b)->name); }
 
 static void load_symbols(void) {
@@ -284,6 +290,15 @@ static void load_symbols(void) {
         if (h) *h = 0;
         char name[400];
         unsigned long long off;
+        FzField fl;
+        long long foff;
+        if (sscanf(line, " \"%95[^.\"].%95[^\"]\" = { offset = %lli , type = \"%63[^\"]\"", fl.type, fl.field, &foff,
+                   fl.kind) == 4 && foff >= 0 && foff < (1ll << 32)) {
+            fl.offset = (uint64_t)foff;
+            FzField *n = realloc(fields, (nfields + 1) * sizeof *fields);
+            if (n) fields = n, fields[nfields++] = fl;
+            continue;
+        }
         // name = 0x..., the name optionally quoted (TOML keys with :: need quotes)
         if (sscanf(line, " \"%399[^\"]\" = %llx", name, &off) != 2 && sscanf(line, " %399[^= 	] = %llx", name, &off) != 2)
             continue;
@@ -297,7 +312,17 @@ static void load_symbols(void) {
     }
     fclose(f);
     qsort(syms, nsyms, sizeof *syms, sym_order);
-    rt_log("fuse: %zu symbols from %s", nsyms, path);
+    rt_log("fuse: %zu symbols and %zu layout fields from %s", nsyms, nfields, path);
+}
+
+int fz_layout(const char *type, const char *field, uint64_t *offset, const char **kind) {
+    for (size_t i = 0; i < nfields; i++)
+        if (!strcmp(fields[i].type, type) && (!field || !strcmp(fields[i].field, field))) {
+            if (offset) *offset = fields[i].offset;
+            if (kind) *kind = fields[i].kind;
+            return 1;
+        }
+    return 0;
 }
 
 uint64_t fz_sym(const char *name) {
@@ -388,6 +413,32 @@ int fz_deployed_config(const char *dir, fz_config_fn cb, void *user) {
             snprintf(id, sizeof id, "%s", !cut && safe_id(val) ? val : "");
         } else if (!strcmp(val, "config")) {
             in_config = id[0] != 0;
+        }
+    }
+    free(text);
+    return n;
+}
+
+int fz_deployed_caps(const char *dir, fz_config_fn cb, void *user) {
+    char path[1024], id[128] = "", val[300];
+    char *text = read_deploy(dir, path, sizeof path);
+    if (!text) return -1;
+    int n = 0, cut, in_caps = 0;
+    const char *p = text;
+    while (next_string(&p, val, sizeof val, &cut)) {
+        if (in_caps) {   // capability strings ("game.read", "net:host"), until the next key ("config")
+            if (strcmp(val, "config") && strcmp(val, "files") && strcmp(val, "id") && strcmp(val, "version")) {
+                if (!cut) cb(id, val, user);
+                continue;
+            }
+            in_caps = 0;
+        }
+        if (!strcmp(val, "id")) {
+            if (!next_string(&p, val, sizeof val, &cut)) break;
+            snprintf(id, sizeof id, "%s", !cut && safe_id(val) ? val : "");
+        } else if (!strcmp(val, "capabilities") && id[0]) {
+            in_caps = 1;
+            cb(id, "", user), n++;   // the package has a list (maybe empty): its scripts are held to it
         }
     }
     free(text);

@@ -85,8 +85,11 @@ struct Pkg {
     float recent[120] = {};   // ms of the last 120 frames, for the max
     int recent_at = 0, over = 0, warm = 3, pause_len = 0;
     uint64_t paused_until = 0;
+    int caps = -1;            // CAP_* the package declared (deploy manifest); -1: not held to a list (loose, console)
+    bool skip_noted = false;  // logged once: a hook of this package tried to skip without game.write
 };
 std::vector<Pkg> pkgs;        // [0] is the console and loose scripts
+enum { CAP_READ = 1, CAP_WRITE = 2 };   // game.read; game.write (implies read: changing a value means reading it)
 int loading_pkg;              // the package whose script is loading: hooks and handlers it registers are its
 double mod_budget_ms = 1.0;   // TOTK_FUSE_MOD_MS
 uint64_t frame_now;           // the frame fz_luau_frame last saw
@@ -108,6 +111,15 @@ thread_local CallFrame *cur_frame;
 thread_local int running_pkg;   // the package whose hook or handler is running on this thread (0 outside one)
 
 int owner_pkg() { return loading_pkg ? loading_pkg : running_pkg; }   // who registers a hook or handler now
+
+// The package whose code is running (a hook's, else the loading script's) must have declared cap; a Lua error if not.
+// What the player saw on the install card ("Asks for: game.read") is what the scripts can do.
+void need(lua_State *l, int cap) {
+    int p = running_pkg ? running_pkg : loading_pkg;
+    if (p <= 0 || p >= (int)pkgs.size() || pkgs[p].caps < 0 || (pkgs[p].caps & cap)) return;
+    luaL_error(l, "%s did not declare %s ([trust] capabilities in its fuse.toml)", pkgs[p].id.c_str(),
+               cap == CAP_WRITE ? "game.write" : "game.read");
+}
 
 CRITICAL_SECTION vm_lock;   // recursive: a script hook may fire inside another script's call
 thread_local int vm_held;   // how many times this thread holds vm_lock (ctx:call lets go of all of them)
@@ -280,12 +292,14 @@ int reg_index(lua_State *l, int arg, int hi) {
 
 int ctx_x(lua_State *l) {
     Cpu *c = ctx_cpu(l);
+    need(l, CAP_READ);
     lua_pushnumber(l, (double)c->x[reg_index(l, 2, 30)]);
     return 1;
 }
 
 int ctx_xs(lua_State *l) {
     Cpu *c = ctx_cpu(l);
+    need(l, CAP_READ);
     char b[24];
     snprintf(b, sizeof b, "0x%llx", (unsigned long long)c->x[reg_index(l, 2, 30)]);
     lua_pushstring(l, b);
@@ -294,6 +308,7 @@ int ctx_xs(lua_State *l) {
 
 int ctx_setx(lua_State *l) {
     Cpu *c = ctx_cpu(l);
+    need(l, CAP_WRITE);
     int i = reg_index(l, 2, 30);
     c->x[i] = to_u64(l, 3);
     return 0;
@@ -301,6 +316,7 @@ int ctx_setx(lua_State *l) {
 
 int ctx_s(lua_State *l) {
     Cpu *c = ctx_cpu(l);
+    need(l, CAP_READ);
     uint32_t w = (uint32_t)c->v[reg_index(l, 2, 31)];
     float f;
     memcpy(&f, &w, 4);
@@ -310,6 +326,7 @@ int ctx_s(lua_State *l) {
 
 int ctx_sets(lua_State *l) {
     Cpu *c = ctx_cpu(l);
+    need(l, CAP_WRITE);
     int i = reg_index(l, 2, 31);
     float f = (float)luaL_checknumber(l, 3);
     uint32_t w;
@@ -324,6 +341,7 @@ int ctx_sets(lua_State *l) {
 // no change. The callee runs as game code: it reaches guest memory only, and any hooks on it run.
 int ctx_call(lua_State *l) {
     Cpu *c = ctx_cpu(l);
+    need(l, CAP_WRITE);   // a called game function can change anything the game can
     uint64_t a = to_u64(l, 2);
     volatile uint8_t *bits;
     uint64_t k;
@@ -407,27 +425,151 @@ int api_main(lua_State *l) {
     return 1;
 }
 
-int api_read8(lua_State *l) { lua_pushnumber(l, LD8(checked(l, 1, 1, 0))); return 1; }
-int api_read16(lua_State *l) { lua_pushnumber(l, LD16(checked(l, 1, 2, 0))); return 1; }
-int api_read32(lua_State *l) { lua_pushnumber(l, LD32(checked(l, 1, 4, 0))); return 1; }
-int api_read64(lua_State *l) { lua_pushnumber(l, (double)LD64(checked(l, 1, 8, 0))); return 1; }
+int api_read8(lua_State *l) { need(l, CAP_READ); lua_pushnumber(l, LD8(checked(l, 1, 1, 0))); return 1; }
+int api_read16(lua_State *l) { need(l, CAP_READ); lua_pushnumber(l, LD16(checked(l, 1, 2, 0))); return 1; }
+int api_read32(lua_State *l) { need(l, CAP_READ); lua_pushnumber(l, LD32(checked(l, 1, 4, 0))); return 1; }
+int api_read64(lua_State *l) { need(l, CAP_READ); lua_pushnumber(l, (double)LD64(checked(l, 1, 8, 0))); return 1; }
 int api_readf(lua_State *l) {
+    need(l, CAP_READ);
     uint32_t w = LD32(checked(l, 1, 4, 0));
     float f;
     memcpy(&f, &w, 4);
     lua_pushnumber(l, f);
     return 1;
 }
-int api_write8(lua_State *l) { ST8(checked(l, 1, 1, 1), (uint8_t)to_bits(l, 2, 8)); return 0; }
-int api_write16(lua_State *l) { ST16(checked(l, 1, 2, 1), (uint16_t)to_bits(l, 2, 16)); return 0; }
-int api_write32(lua_State *l) { ST32(checked(l, 1, 4, 1), (uint32_t)to_bits(l, 2, 32)); return 0; }
+int api_write8(lua_State *l) { need(l, CAP_WRITE); ST8(checked(l, 1, 1, 1), (uint8_t)to_bits(l, 2, 8)); return 0; }
+int api_write16(lua_State *l) { need(l, CAP_WRITE); ST16(checked(l, 1, 2, 1), (uint16_t)to_bits(l, 2, 16)); return 0; }
+int api_write32(lua_State *l) { need(l, CAP_WRITE); ST32(checked(l, 1, 4, 1), (uint32_t)to_bits(l, 2, 32)); return 0; }
 int api_writef(lua_State *l) {
+    need(l, CAP_WRITE);
     uint64_t a = checked(l, 1, 4, 1);
     float f = (float)luaL_checknumber(l, 2);
     uint32_t w;
     memcpy(&w, &f, 4);
     ST32(a, w);
     return 0;
+}
+
+// ---- typed views: fuse.view(addr, "Type") sees guest memory as a type from the symbol file's [layouts]
+// (`"Type.field" = { offset = 0x10, type = "f32" }`). Fields read and write through the same checks as fuse.read* and
+// fuse.write* (guest memory only; game.read / game.write); an embedded struct is a view, "*Type" follows a pointer.
+
+const char *const VIEW = "fuse.view";
+struct View {
+    uint64_t addr;
+    char type[96];
+};
+
+void push_view(lua_State *l, uint64_t addr, const char *type) {
+    View *v = (View *)lua_newuserdata(l, sizeof(View));
+    v->addr = addr;
+    snprintf(v->type, sizeof v->type, "%s", type);
+    luaL_getmetatable(l, VIEW);
+    lua_setmetatable(l, -2);
+}
+
+int api_view(lua_State *l) {
+    uint64_t a = to_u64(l, 1);
+    const char *t = luaL_checkstring(l, 2);
+    if (!fz_layout(t, NULL, NULL, NULL)) luaL_error(l, "no layout for type %s ([layouts] in TOTK_FUSE_SYMBOLS)", t);
+    push_view(l, a, t);
+    return 1;
+}
+
+int scalar_size(const char *k) {   // bytes of a number or bool field; 0 for a struct or pointer-to-struct
+    if (!strcmp(k, "u8") || !strcmp(k, "s8") || !strcmp(k, "bool")) return 1;
+    if (!strcmp(k, "u16") || !strcmp(k, "s16")) return 2;
+    if (!strcmp(k, "u32") || !strcmp(k, "s32") || !strcmp(k, "f32")) return 4;
+    if (!strcmp(k, "u64") || !strcmp(k, "s64") || !strcmp(k, "f64") || !strcmp(k, "ptr")) return 8;
+    return 0;
+}
+
+View *view_field(lua_State *l, uint64_t *a, const char **kind) {
+    View *v = (View *)luaL_checkudata(l, 1, VIEW);
+    const char *key = luaL_checkstring(l, 2);
+    uint64_t off;
+    if (!fz_layout(v->type, key, &off, kind)) luaL_error(l, "%s has no field %s", v->type, key);
+    *a = v->addr + off;
+    return v;
+}
+
+int view_index(lua_State *l) {
+    if (lua_isstring(l, 2) && !strcmp(lua_tostring(l, 2), "addr")) {
+        lua_pushnumber(l, (double)((View *)luaL_checkudata(l, 1, VIEW))->addr);
+        return 1;
+    }
+    uint64_t a;
+    const char *k;
+    View *v = view_field(l, &a, &k);
+    int n = scalar_size(k);
+    if (!n && k[0] != '*') {   // an embedded struct: a view, nothing read yet
+        push_view(l, a, k);
+        return 1;
+    }
+    need(l, CAP_READ);
+    if (!guest_ok(a, n ? n : 8, 0))
+        luaL_error(l, "%s.%s at 0x%llx is not readable guest memory", v->type, lua_tostring(l, 2), (unsigned long long)a);
+    if (k[0] == '*') {   // a pointer to a struct: its view, or nil for a null pointer
+        uint64_t p = LD64(a);
+        if (p) push_view(l, p, k + 1);
+        else lua_pushnil(l);
+        return 1;
+    }
+    if (!strcmp(k, "bool")) lua_pushboolean(l, LD8(a) != 0);
+    else if (!strcmp(k, "u8")) lua_pushnumber(l, LD8(a));
+    else if (!strcmp(k, "s8")) lua_pushnumber(l, (int8_t)LD8(a));
+    else if (!strcmp(k, "u16")) lua_pushnumber(l, LD16(a));
+    else if (!strcmp(k, "s16")) lua_pushnumber(l, (int16_t)LD16(a));
+    else if (!strcmp(k, "u32")) lua_pushnumber(l, LD32(a));
+    else if (!strcmp(k, "s32")) lua_pushnumber(l, (int32_t)LD32(a));
+    else if (!strcmp(k, "s64")) lua_pushnumber(l, (double)(int64_t)LD64(a));
+    else if (!strcmp(k, "f32")) {
+        uint32_t w = LD32(a);
+        float f;
+        memcpy(&f, &w, 4);
+        lua_pushnumber(l, f);
+    } else if (!strcmp(k, "f64")) {
+        uint64_t w = LD64(a);
+        double d;
+        memcpy(&d, &w, 8);
+        lua_pushnumber(l, d);
+    } else lua_pushnumber(l, (double)LD64(a));   // u64, ptr
+    return 1;
+}
+
+int view_newindex(lua_State *l) {
+    uint64_t a;
+    const char *k;
+    View *v = view_field(l, &a, &k);
+    int n = scalar_size(k);
+    if (!n || !strcmp(k, "ptr")) luaL_error(l, "%s.%s is not a number or bool field", v->type, lua_tostring(l, 2));
+    need(l, CAP_WRITE);
+    if (!guest_ok(a, n, 1))
+        luaL_error(l, "%s.%s at 0x%llx is not writable guest memory", v->type, lua_tostring(l, 2), (unsigned long long)a);
+    if (!strcmp(k, "bool")) ST8(a, lua_toboolean(l, 3) ? 1 : 0);
+    else if (!strcmp(k, "f32")) {
+        float f = (float)luaL_checknumber(l, 3);
+        uint32_t w;
+        memcpy(&w, &f, 4);
+        ST32(a, w);
+    } else if (!strcmp(k, "f64")) {
+        double d = luaL_checknumber(l, 3);
+        uint64_t w;
+        memcpy(&w, &d, 8);
+        ST64(a, w);
+    } else if (n == 1) ST8(a, (uint8_t)to_bits(l, 3, 8));
+    else if (n == 2) ST16(a, (uint16_t)to_bits(l, 3, 16));
+    else if (n == 4) ST32(a, (uint32_t)to_bits(l, 3, 32));
+    else ST64(a, to_u64(l, 3));
+    return 0;
+}
+
+int view_tostring(lua_State *l) {
+    View *v = (View *)luaL_checkudata(l, 1, VIEW);
+    char b[128];
+    snprintf(b, sizeof b, "%s@0x%llx", v->type, (unsigned long long)v->addr);
+    lua_pushstring(l, b);
+    return 1;
 }
 
 // Calls the function in the registry with one argument pushed by push(); returns its first result as a boolean
@@ -453,6 +595,13 @@ template <class Push> int call_ref(ScriptRef *h, int ref, Push push) {
         if (h->errors == 10) rt_log("lua: %s disabled after 10 errors", where);
     } else {
         skip = lua_toboolean(T, -1);
+        Pkg &own = pkgs[h->pkg];   // indexed again: the vector may have grown during the call
+        if (skip && own.caps >= 0 && !(own.caps & CAP_WRITE)) {   // skipping the game's own code changes the game
+            if (!own.skip_noted) rt_log("lua: %s did not declare game.write; its hook may not skip the game function",
+                                        own.id.c_str());
+            own.skip_noted = true;
+            skip = 0;
+        }
     }
     give_thread(T);
     call_deadline_ns = outer;
@@ -541,12 +690,17 @@ void open_vm() {
     luaL_register(L, NULL, ctx_methods);
     lua_setfield(L, -2, "__index");
     lua_pop(L, 1);
+    static const luaL_Reg view_meta[] = {{"__index", view_index}, {"__newindex", view_newindex},
+                                         {"__tostring", view_tostring}, {NULL, NULL}};
+    luaL_newmetatable(L, VIEW);
+    luaL_register(L, NULL, view_meta);
+    lua_pop(L, 1);
     static const luaL_Reg api[] = {
         {"log", api_log},         {"notify", api_notify},   {"main", api_main},     {"sym", api_sym},
         {"hook", api_hook},
         {"on", api_on},           {"read8", api_read8},     {"read16", api_read16}, {"read32", api_read32},
         {"read64", api_read64},   {"readf", api_readf},     {"write8", api_write8}, {"write16", api_write16},
-        {"write32", api_write32}, {"writef", api_writef},   {NULL, NULL}};
+        {"write32", api_write32}, {"writef", api_writef},   {"view", api_view},       {NULL, NULL}};
     lua_newtable(L);
     luaL_register(L, NULL, api);
     lua_setglobal(L, "fuse");
@@ -694,6 +848,14 @@ bool load_deployed(const std::string &dir) {
     deployed.clear();
     read_disabled(dir);
     pkg_config.clear();
+    // Each package's declared capabilities: its scripts are held to them (need()). A manifest from before the lists
+    // were written has none; those packages run unrestricted until the next deploy.
+    fz_deployed_caps(dir.c_str(), [](const char *id, const char *cap, void *) {
+        Pkg &pk = pkgs[pkg_index(id)];
+        if (!*cap) pk.caps = 0;
+        else if (!strcmp(cap, "game.read")) pk.caps |= CAP_READ;
+        else if (!strcmp(cap, "game.write")) pk.caps |= CAP_READ | CAP_WRITE;
+    }, NULL);
     fz_deployed_config(dir.c_str(), [](const char *id, const char *entry, void *) { pkg_config.emplace_back(id, entry); },
                        NULL);
     int n = fz_deployed_files(dir.c_str(), ".luau", [](const char *id, const char *path, const char *sha, void *u) {

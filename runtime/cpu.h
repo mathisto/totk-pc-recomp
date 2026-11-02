@@ -85,8 +85,9 @@ typedef uint8_t __attribute__((may_alias)) u8a;
 // runs the hooks around the body and returns 1 when it ran the function in its place. (g_fnprof kept its name from
 // the function-entry profiler stub this replaced.)
 //
-// FZ_PATCH builds (tools/build_game.py with FZ_PATCH=1) have no gate at all: generated code is compiled with
-// -fpatchable-function-entry=7,5, so each lifted function starts with five spare bytes before its entry and a two-byte
+// FZ_PATCH builds (tools/build_game.py's default; FZ_PATCH=0 builds the gate above) have no gate at all: generated
+// code is compiled with -fpatchable-function-entry=7,5, so each lifted function starts with five spare bytes before
+// its entry and a two-byte
 // no-op at it, and fuse_hooks.c hooks a function by patching its entry to jump to a stub (zero cost for every function
 // without a hook). FN_ATTR keeps lifted functions out of line there: an inlined copy would bypass the patched entry.
 extern volatile int g_fnprof;

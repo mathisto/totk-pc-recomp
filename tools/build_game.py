@@ -94,7 +94,7 @@ SDL3_DLLS = [UCRT / 'SDL3.dll', UCRT / 'libiconv-2.dll', UCRT / 'libopus-0.dll']
 # Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows), plus -march for the FP/SIMD lowering.
 GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden',
              '-march=x86-64-v3', '-DFZ_GUEST_CODE']   # FZ_GUEST_CODE: lifted memory accesses stay in guest space (cpu.h GA)
-if os.environ.get('FZ_PATCH') == '1':   # Fuse hooks by patched function entries instead of the entry gate (cpu.h)
+if os.environ.get('FZ_PATCH', '1') != '0':   # Fuse hooks by patched function entries (cpu.h); FZ_PATCH=0: the entry gate
     GEN_FLAGS += ['-DFZ_PATCH', '-fpatchable-function-entry=7,5', '-fcf-protection=none']
 RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing', '-march=x86-64-v3']
 if WIN:
