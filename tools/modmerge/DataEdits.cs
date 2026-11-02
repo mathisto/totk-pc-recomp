@@ -10,6 +10,7 @@
 //                                   Pack/Actor/<Name>.pack.zs (or the pack named by "pack")
 //           text:<Locale|*>/<message file>/<label>   a message (an item's name) in Mals/<Locale>.Product.<ver>.sarc.zs,
 //                                   op set on path "Text"; * is every language the game has
+//           item:<Name>             a new actor: ops [["clone", template, {"name": ..., "caption": ...}]] (decision 0007)
 //   select  {"path": array, "match": {field: value}}: the ops apply to the one record of that array that matches
 //   ops     set, add or mul; path is dot-separated map keys and array indexes ("List.0.Value"). Values keep the type
 //           the game file already has (an Int stays an Int); set on a missing key adds it with the value's own type.
@@ -18,7 +19,11 @@
 // Edits apply in order to one in-memory copy of each file, so two mods' mul edits stack. Only changed files are written,
 // uncompressed under <out>/romfs/<path> (the merge recompresses). --over DIR reads a file from DIR/romfs/<path> (a merge
 // output, compressed or not) in place of vanilla when it is there. The op "get" prints the value at a path instead of
-// changing it (for checks). Exit codes: 0 written, 1 failed, 2 bad command line.
+// changing it (for checks; a map prints its keys). Exit codes: 0 written, 1 failed, 2 bad command line.
+//
+// $parent: a field a file inherits (its "$parent" is "Work/<path>.gyml", the file <path>.bgyml) is read up the chain
+// for add, mul and get: in the same pack, else the pack named after the parent, else a loose file; at most 8 levels.
+// add and mul then write the result into the edited file itself, so only that actor changes.
 using System.Text.Json;
 using BymlLibrary;
 using BymlLibrary.Nodes.Containers;
@@ -44,6 +49,7 @@ static class DataEdits
         public Sarc? Pack;                     // a pack, with its edited members below
         public readonly Dictionary<string, (Byml Root, Endianness Endian, ushort Version)> Members = [];
         public readonly Dictionary<string, Msbt> Texts = [];   // a message archive's edited message files
+        public byte[]? Raw;                    // a file copied as it is (a new item's icon)
         public bool Changed;
     }
 
@@ -86,6 +92,10 @@ static class DataEdits
                 string target = edit.GetProperty("target").GetString()!;
                 string? pack = edit.TryGetProperty("pack", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
                 try {
+                    if (target.StartsWith("item:")) {
+                        applied += CloneItem(rom, docs, target[5..], edit.GetProperty("ops")[0]);
+                        continue;
+                    }
                     if (target.StartsWith("text:")) {
                         applied += ApplyText(rom, docs, target, edit.GetProperty("ops"));
                         continue;
@@ -93,11 +103,30 @@ static class DataEdits
                     Byml node = Resolve(rom, docs, target, pack, out var doc);
                     if (edit.TryGetProperty("select", out var sel)) node = Select(node, sel);
                     foreach (var op in edit.GetProperty("ops").EnumerateArray()) {
-                        if (op[0].GetString() == "get") {
-                            Console.WriteLine($"get {target} {op[1].GetString()} = {Show(Get(node, op[1].GetString()!))}");
+                        string kind = op[0].GetString()!, path = op[1].GetString()!;
+                        // A top-level field this file inherits: read it from the $parent chain.
+                        Byml? inherited = null;
+                        string from = "";
+                        if (kind is "get" or "add" or "mul" && !path.Contains('.') && path.Length > 0
+                            && node.Type == BymlNodeType.Map && !node.GetMap().ContainsKey(path))
+                            inherited = Inherited(rom, docs, doc, node, path, out from);
+                        if (kind == "get") {
+                            string head = path.Split('.')[0];
+                            if (inherited is null && path.Contains('.') && node.Type == BymlNodeType.Map
+                                && !node.GetMap().ContainsKey(head) && Inherited(rom, docs, doc, node, head, out from) is { } table)
+                                inherited = Get(table, path[(head.Length + 1)..]);   // inside an inherited table
+                            Console.WriteLine($"get {target} {path} = " + (inherited is null ? Show(Get(node, path))
+                                : $"{Show(inherited)}, inherited from {from}"));
                             continue;
                         }
-                        Apply(node, op[0].GetString()!, op[1].GetString()!, op[2]);
+                        if (inherited is not null) node.GetMap()[path] = inherited;   // replaced by the result below
+                        // A field inside an inherited table or vector (AngleOfPouchPop.X): the edited file gets its own
+                        // copy of the parent's value first, so the parent and the actors sharing it stay as they are.
+                        string first = path.Split('.')[0];
+                        if (path.Contains('.') && kind is "set" or "add" or "mul" && node.Type == BymlNodeType.Map
+                            && !node.GetMap().ContainsKey(first) && Inherited(rom, docs, doc, node, first, out _) is { } whole)
+                            node.GetMap()[first] = Clone(whole);
+                        Apply(node, kind, path, op[2]);
                         applied++;
                         doc.Changed = true;
                     }
@@ -126,6 +155,9 @@ static class DataEdits
                     }
                     foreach (var (name, msbt) in doc.Texts) sarc[name] = msbt.ToBinary(null, null);
                     sarc.Write(ms);
+                }
+                else if (doc.Raw is { } raw) {
+                    ms.Write(raw);
                 }
                 else {
                     doc.Root!.WriteBinary(ms, doc.Endian, doc.Version);
@@ -215,6 +247,157 @@ static class DataEdits
             default:
                 throw new EditError($"unknown target namespace '{ns}' (rsdb, file, param)");
         }
+    }
+
+    // ---- new items (decision 0007): an actor cloned from a template, under its own name
+
+    static readonly System.Text.RegularExpressions.Regex ActorName = new("^[A-Za-z][A-Za-z0-9_]{2,63}$");
+    static readonly string[] ItemTables = ["ActorInfo", "GameActorInfo", "PouchActorInfo", "AttachmentActorInfo",
+                                           "EnhancementMaterialInfo"];
+
+    // The template's actor pack under the new name (its own members renamed, references to them rewritten; shared
+    // files such as the model, physics and $parent defaults still point at the originals), its rows in the actor and
+    // inventory tables, its name and caption in every language, and its icon. The number of files made or changed.
+    static int CloneItem(ITkRom rom, Dictionary<string, Doc> docs, string name, JsonElement op)
+    {
+        if (op[0].GetString() != "clone") throw new EditError("an item target takes one clone operation");
+        string from = op[1].GetString()!;
+        JsonElement texts = op[2];
+        if (!ActorName.IsMatch(name) || !ActorName.IsMatch(from) || name == from)
+            throw new EditError("item names are letters, digits and _ (3 to 64), and the new one differs from its template");
+        int files = 0;
+
+        // 1. The actor pack.
+        string srcPath = rom.CanonicalToRelativePath($"Pack/Actor/{from}.pack", TkFileAttributes.HasZsExtension);
+        string dstPath = rom.CanonicalToRelativePath($"Pack/Actor/{name}.pack", TkFileAttributes.HasZsExtension);
+        if (docs.ContainsKey(dstPath) || Read(rom, dstPath) is not null)
+            throw new EditError($"the game or an earlier item already has an actor named {name}");
+        byte[] packBytes = Read(rom, srcPath) ?? throw new EditError($"no actor pack for {from}");
+        var pack = Sarc.FromBinary(packBytes);
+        var renamed = new Dictionary<string, string>(StringComparer.Ordinal);   // old member -> new member
+        foreach (string member in pack.Keys.ToList()) {
+            int slash = member.LastIndexOf('/');
+            string file = member[(slash + 1)..];
+            if (file.StartsWith(from + ".")) renamed[member] = member[..(slash + 1)] + name + file[from.Length..];
+        }
+        if (renamed.Count == 0) throw new EditError($"{from}'s pack has no members named after it; it cannot be cloned");
+        foreach (var (oldName, newName) in renamed) {
+            var data = pack[oldName];
+            pack.Remove(oldName);
+            pack[newName] = data;
+        }
+        var doc = new Doc { RelativePath = dstPath, Pack = pack, Changed = true };
+        int refs = 0;
+        // A string refers to a member as "?<member>" or as "Work/<member without .bgyml>.gyml".
+        string? Rewrite(string v)
+        {
+            string member = v.StartsWith('?') ? v[1..] : v.StartsWith("Work/") && v.EndsWith(".gyml") ? v[5..^5] + ".bgyml" : v;
+            if (!renamed.ContainsKey(member)) return null;
+            int at = v.LastIndexOf("/" + from + ".", StringComparison.Ordinal);
+            return at < 0 ? null : v[..(at + 1)] + name + v[(at + 1 + from.Length)..];
+        }
+        foreach (string member in pack.Keys.Where(m => m.EndsWith(".bgyml") || m.EndsWith(".byml")).ToList()) {
+            var root = Byml.FromBinary(pack[member].ToArray(), out var endian, out var version);
+            int n = RewriteStrings(root, Rewrite);
+            if (n > 0) {
+                doc.Members[member] = (root, endian, version);
+                refs += n;
+            }
+        }
+        docs[dstPath] = doc;
+        files++;
+
+        // 2. Rows: a copy of the template's row in each table that has one, kept in __RowId order.
+        int rows = 0;
+        foreach (string table in ItemTables) {
+            var t = TryLooseDoc(rom, docs, $"RSDB/{table}.Product.rstbl.byml",
+                TkFileAttributes.HasZsExtension | TkFileAttributes.IsProductFile);
+            if (t?.Root is not { Type: BymlNodeType.Array } tableRoot) continue;
+            var list = tableRoot.GetArray();
+            static string Id(Byml r) => r.Type == BymlNodeType.Map && r.GetMap().TryGetValue("__RowId", out var id)
+                                        && id.Type == BymlNodeType.String ? id.GetString() : "";
+            Byml? template = list.FirstOrDefault(r => Id(r) == from);
+            if (template is null) continue;
+            if (list.Any(r => Id(r) == name)) throw new EditError($"{table} already has a row {name}");
+            var row = Clone(template);
+            var map = row.GetMap();
+            map["__RowId"] = new Byml(name);
+            if (map.TryGetValue("ActorName", out var an) && an.Type == BymlNodeType.String && an.GetString() == from)
+                map["ActorName"] = new Byml(name);
+            int at = 0;
+            while (at < list.Count && string.CompareOrdinal(Id(list[at]), name) < 0) at++;
+            list.Insert(at, row);
+            t.Changed = true;
+            rows++;
+            files++;
+        }
+        if (rows == 0) throw new EditError($"{from} has no row in {string.Join(", ", ItemTables)}");
+
+        // 3. Name and caption in every language, keeping the template's control tags.
+        int labels = 0;
+        foreach (string loc in Locales) {
+            string rel = rom.CanonicalToRelativePath($"Mals/{loc}.Product.sarc",
+                TkFileAttributes.HasZsExtension | TkFileAttributes.IsProductFile);
+            if (!docs.TryGetValue(rel, out var mals)) {
+                byte[]? bytes = Read(rom, rel);
+                if (bytes is null) continue;
+                mals = new Doc { RelativePath = rel, Pack = Sarc.FromBinary(bytes) };
+                docs[rel] = mals;
+            }
+            const string file = "ActorMsg/PouchContent.msbt";
+            if (!mals.Texts.TryGetValue(file, out var msbt)) {
+                if (!mals.Pack!.TryGetValue(file, out var data)) continue;
+                msbt = Msbt.FromBinary(data.ToArray(), MsbtOptions.Default);
+                mals.Texts[file] = msbt;
+            }
+            foreach (string key in new[] { "Name", "Caption" }) {
+                string old = msbt.TryGetValue($"{from}_{key}", out var e) ? e.Text ?? "" : "";
+                string? given = texts.TryGetProperty(key.ToLowerInvariant(), out var g) && g.ValueKind == JsonValueKind.String
+                    ? g.GetString() : null;
+                if (given is null && old.Length == 0) continue;
+                msbt[$"{name}_{key}"] = new MsbtEntry { Text = given is null ? old : KeepTags(old, given) };
+                labels++;
+            }
+            mals.Changed = true;
+        }
+        files++;
+
+        // 4. The icon.
+        byte[]? icon = Read(rom, rom.CanonicalToRelativePath($"UI/Tex/Icon/{from}.bntx", TkFileAttributes.HasZsExtension));
+        string iconPath = rom.CanonicalToRelativePath($"UI/Tex/Icon/{name}.bntx", TkFileAttributes.HasZsExtension);
+        if (icon is not null) {
+            docs[iconPath] = new Doc { RelativePath = iconPath, Raw = icon, Changed = true };
+            files++;
+        }
+        Console.WriteLine($"item {name} from {from}: pack with {renamed.Count} members renamed and {refs} references " +
+                          $"rewritten, {rows} rows, {labels} labels, " + (icon is null ? "no icon (the template has none)" : "icon"));
+        return files;
+    }
+
+    // Replaces every string value f maps to something (f returns null to keep it), in maps and arrays. The count.
+    static int RewriteStrings(Byml node, Func<string, string?> f)
+    {
+        int n = 0;
+        if (node.Type == BymlNodeType.Map) {
+            var map = node.GetMap();
+            foreach (string k in map.Keys.ToList()) {
+                var v = map[k];
+                if (v.Type == BymlNodeType.String) {
+                    if (f(v.GetString()) is { } nv) { map[k] = new Byml(nv); n++; }
+                }
+                else n += RewriteStrings(v, f);
+            }
+        }
+        else if (node.Type == BymlNodeType.Array) {
+            var arr = node.GetArray();
+            for (int i = 0; i < arr.Count; i++) {
+                if (arr[i].Type == BymlNodeType.String) {
+                    if (f(arr[i].GetString()) is { } nv) { arr[i] = new Byml(nv); n++; }
+                }
+                else n += RewriteStrings(arr[i], f);
+            }
+        }
+        return n;
     }
 
     // text:<locale|*>/<file>/<label>: sets the label's text in each language's message archive. The ops applied.
@@ -387,6 +570,7 @@ static class DataEdits
 
     static Byml? Get(Byml node, string path)
     {
+        if (path.Length == 0) return node;
         Byml? cur = node;
         foreach (string part in path.Split('.')) {
             if (cur is null) return null;
@@ -401,8 +585,73 @@ static class DataEdits
         BymlNodeType.Float => $"{b.GetFloat()} (Float)", BymlNodeType.Double => $"{b.GetDouble()} (Double)",
         BymlNodeType.Bool => $"{b.GetBool()} (Bool)", BymlNodeType.String => $"\"{b.GetString()}\" (String)",
         BymlNodeType.Array => $"(Array, {b.GetArray().Count} items)",
+        BymlNodeType.Map => $"(Map: {string.Join(", ", b.GetMap().Keys.Order(StringComparer.Ordinal))})",
         _ => $"({b.Type})"
     };
+
+    // The value a map inherits for key through its "$parent" chain, and in from the parent that has it; null when no
+    // file in the chain has the key.
+    static Byml? Inherited(ITkRom rom, Dictionary<string, Doc> docs, Doc doc, Byml node, string key, out string from)
+    {
+        from = "";
+        Byml cur = node;
+        for (int depth = 0; depth < 8; depth++) {
+            if (cur.Type != BymlNodeType.Map || !cur.GetMap().TryGetValue("$parent", out var link) || link.Type != BymlNodeType.String)
+                return null;
+            string parent = link.GetString();
+            cur = LoadParent(rom, docs, doc, parent)
+                  ?? throw new EditError($"{key} is inherited from {parent}, which was not found; use set to give it a value");
+            if (cur.Type == BymlNodeType.Map && cur.GetMap().TryGetValue(key, out var v)) {
+                from = parent;
+                return v;
+            }
+        }
+        throw new EditError($"{key}: the $parent chain is longer than 8 files (a loop?)");
+    }
+
+    static Byml Clone(Byml b)
+    {
+        switch (b.Type) {
+            case BymlNodeType.Map: {
+                var m = new BymlMap();
+                foreach (var (k, v) in b.GetMap()) m[k] = Clone(v);
+                return new Byml(m);
+            }
+            case BymlNodeType.Array: {
+                var a = new BymlArray();
+                foreach (var v in b.GetArray()) a.Add(Clone(v));
+                return new Byml(a);
+            }
+            default:
+                return b;   // scalars are never changed in place (edits store a new node)
+        }
+    }
+
+    static readonly Dictionary<string, Byml> parentCache = new(StringComparer.Ordinal);
+
+    // A parent file ("Work/<path>.gyml" names <path>.bgyml): in the edited file's own pack (as edited so far), else in
+    // Pack/Actor/<parent name>.pack, else loose in the RomFS. null when none has it.
+    static Byml? LoadParent(ITkRom rom, Dictionary<string, Doc> docs, Doc doc, string link)
+    {
+        if (!link.StartsWith("Work/") || !link.EndsWith(".gyml") || link.Contains("..") || link.Contains('\\') || link.Contains(':'))
+            return null;
+        string member = link[5..^5] + ".bgyml";
+        if (doc.Pack is { } own) {
+            if (doc.Members.TryGetValue(member, out var edited)) return edited.Root;
+            if (own.TryGetValue(member, out var data)) return Byml.FromBinary(data.ToArray());
+        }
+        if (parentCache.TryGetValue(member, out var cached)) return cached;
+        Byml? found = null;
+        string stem = Path.GetFileName(member).Split('.')[0];
+        byte[]? pack = Read(rom, rom.CanonicalToRelativePath($"Pack/Actor/{stem}.pack", TkFileAttributes.HasZsExtension));
+        if (pack is not null && Sarc.FromBinary(pack).TryGetValue(member, out var m)) found = Byml.FromBinary(m.ToArray());
+        if (found is null) {
+            byte[]? loose = Read(rom, rom.CanonicalToRelativePath(member, TkFileAttributes.HasZsExtension)) ?? Read(rom, member);
+            if (loose is not null) found = Byml.FromBinary(loose);
+        }
+        if (found is not null) parentCache[member] = found;
+        return found;
+    }
 
     static void Apply(Byml node, string op, string path, JsonElement value)
     {

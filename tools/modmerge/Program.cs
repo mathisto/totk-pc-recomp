@@ -25,6 +25,8 @@ using TkSharp.IO.Writers;
 using TkSharp.Merging;
 
 if (args.Length > 0 && args[0] == "data") return DataEdits.Run(args[1..]);   // Fuse data edits (DataEdits.cs)
+if (args.Length > 0 && args[0] == "catalog") return Catalog.Run(args[1..]);   // names data edits can target (Catalog.cs)
+if (args.Length > 0 && args[0] == "list") return Catalog.List(args[1..]);     // a pack's member names (Catalog.cs)
 
 static int Usage(string message)
 {

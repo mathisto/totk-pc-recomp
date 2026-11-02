@@ -517,13 +517,24 @@ def cpu_list(mask):
 # ---- modmerge
 
 def dotnet():
+    """The first dotnet (PATH, then the per-user install) with a .NET 10 or newer SDK: modmerge targets net10.0, and a
+    machine-wide older SDK on PATH cannot build it."""
     local = Path(os.environ.get('LOCALAPPDATA', '')) / 'Microsoft' / 'dotnet' / 'dotnet.exe'
-    return shutil.which('dotnet') or (str(local) if local.is_file() else None)
+    for exe in (shutil.which('dotnet'), str(local) if local.is_file() else None):
+        if not exe:
+            continue
+        try:
+            sdks = subprocess.run([exe, '--list-sdks'], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if any(line.split('.')[0].isdigit() and int(line.split('.')[0]) >= 10 for line in sdks.splitlines()):
+            return exe
+    return None
 
 
 def build_modmerge(dn):
     """Builds tools/modmerge when its program is missing or older than its source."""
-    sources = [MODMERGE / 'Program.cs', MODMERGE / 'DataEdits.cs', MODMERGE / 'TotkModMerge.csproj']
+    sources = [MODMERGE / 'Program.cs', MODMERGE / 'DataEdits.cs', MODMERGE / 'Catalog.cs', MODMERGE / 'TotkModMerge.csproj']
     if MODMERGE_DLL.is_file() and MODMERGE_DLL.stat().st_mtime >= max(s.stat().st_mtime for s in sources):
         return
     if not (MODMERGE / 'TkSharp' / 'TkSharp.sln').is_file():
@@ -817,6 +828,25 @@ def run_data_edits(profile, base, edits, out, log):
     print('fuse data edits: ' + (text[-1] if text else 'done'))
 
 
+def cmd_catalog(args):
+    """totk-modmerge catalog: the names Fuse data edits can target, read from the player's game into one JSON file."""
+    path = profile_path(args)
+    profile = load_profile(path)
+    base, install, romfs, version = setup(args, profile, path)
+    merge = profile['merge']
+    dn = dotnet()
+    if not dn:
+        raise SystemExit('dotnet missing: tools/modmerge needs the .NET 10 SDK')
+    build_modmerge(dn)
+    command = [dn, str(MODMERGE_DLL), 'catalog', '--keys', str(resolve(merge.get('keys', '~/.switch'), base)),
+               '--base', str(resolve(merge['base'], base)), '--update', str(resolve(merge['update'], base)),
+               '--version', merge['version'], '--index', str(romfs / 'index.json'), '--out', str(args.out.resolve())]
+    if args.no_params:
+        command.append('--no-params')
+    done = subprocess.run(command, env=dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1'))
+    return done.returncode
+
+
 def launch(install, args, pinned):
     exe = install / 'totk.exe'
     if not exe.is_file():
@@ -873,7 +903,10 @@ def main():
     p.add_argument('--res', help='game resolution WxH (default: output_res of totk.ini)')
     p.add_argument('--patch-python', help='Python 3.14 for make_romfs_patches.py (default: the profile\'s '
                                           'patch_python, else this Python when it is 3.14 or newer)')
-    v = sub.add_parser('verify', help='check an install\'s overlays as totk.exe\'s start does')
+    k = sub.add_parser('catalog', help='write the names Fuse data edits can target (tables, rows, params, text)')
+    k.add_argument('--out', type=Path, required=True)
+    k.add_argument('--no-params', action='store_true', help='skip the actor packs (much faster)')
+    v = sub.add_parser('verify',help='check an install\'s overlays as totk.exe\'s start does')
     v.add_argument('--install', type=Path, required=True)
     d = sub.add_parser('deploy', help='deploy a modmerge output')
     d.add_argument('--install', type=Path, required=True)
@@ -883,9 +916,9 @@ def main():
                                           'patches (default: this Python when it is 3.14 or newer)')
     u = sub.add_parser('undeploy')
     u.add_argument('--install', type=Path, required=True)
-    for s in (a, c, p):
+    for s in (a, c, p, k):
         s.add_argument('--install', type=Path, help='the install (default: the profile\'s)')
-    for s in (a, c, p, v, d):
+    for s in (a, c, p, v, d, k):
         s.add_argument('--romfs', type=Path, help='the RomFS folder (default: the profile\'s romfs, else romfs in '
                                                   'totk.ini, else <install>/romfs)')
     args = ap.parse_args()
@@ -896,7 +929,8 @@ def main():
         print(json.dumps(undeploy_overlay(args.install)))
     else:
         handlers = dict(init=cmd_init, list=cmd_list, add=cmd_add, enable=cmd_switch, disable=cmd_switch,
-                        remove=cmd_switch, order=cmd_order, check=cmd_check, apply=cmd_apply, verify=cmd_verify)
+                        remove=cmd_switch, order=cmd_order, check=cmd_check, apply=cmd_apply, verify=cmd_verify,
+                        catalog=cmd_catalog)
         return handlers[args.command](args)
 
 
